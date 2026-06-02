@@ -1,0 +1,62 @@
+# --- Raw and heavy data (NEVER push) ---
+data/
+*.hdf5
+*.h5
+
+# --- Reference PDFs (often copyrighted; keep local only) ---
+Papers/
+
+# --- Claude Code per-project session/config (private to your machine) ---
+.claude/
+
+# --- Stray matplotlib figures at the repo root (junk) ---
+/Figure_*.png
+/Figure_*.jpg
+
+# --- Personal setup guides (kept locally, not shared) ---
+GUIDE_*.md
+
+# --- Outputs (figures, reports) — push everything that documents results ---
+# Note: must use outputs/* (not outputs/) so the directory itself stays tracked
+# and `!` exceptions below can re-include specific files.
+outputs/*
+!outputs/*.md
+!outputs/*.png
+!outputs/*.csv
+
+# --- Python caches ---
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+.pytest_cache/
+.mypy_cache/
+
+# --- Virtual envs (the external SMAK venv stays untouched) ---
+.venv/
+venv/
+env/
+.env
+
+# --- IDE and OS ---
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+
+# --- Notebook / Colab checkpoints ---
+.ipynb_checkpoints/
+
+# --- ML model artifacts (heavy, regenerable) ---
+*.pt
+*.pth
+*.ckpt
+models/
+
+# --- Generated scan plans ---
+*.dpm
+*_scan_plan.json
+*_scan_plan.pkl

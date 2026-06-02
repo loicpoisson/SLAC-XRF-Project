@@ -1,0 +1,15 @@
+# Force consistent line endings across all OS for text files.
+# Without this, Windows clones get CRLF and Linux/Mac get LF, which causes
+# noisy diffs and the "LF will be replaced by CRLF" warning on Windows.
+* text=auto eol=lf
+
+# Binary files — never normalize
+*.png  binary
+*.jpg  binary
+*.pdf  binary
+*.hdf5 binary
+*.h5   binary
+*.pt   binary
+*.pth  binary
+*.pkl  binary
+*.npz  binary
