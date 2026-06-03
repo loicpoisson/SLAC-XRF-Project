@@ -50,6 +50,16 @@ def available_levels(sample, data_dir=None):
     return sorted(found, reverse=True)
 
 
+def dwell_ms_from_path(path, default=10.0):
+    """
+    Parse the per-pixel dwell [ms] from a SMAK filename like
+    'SMW_UA1_P1_250um_10ms_...' (-> 10.0). Falls back to `default` if the
+    '<N>ms' token is absent.
+    """
+    m = re.search(r"_(\d+(?:\.\d+)?)ms_", Path(path).name)
+    return float(m.group(1)) if m else float(default)
+
+
 # ── Refinement primitives ─────────────────────────────────────────────────────
 
 def refine_step(comp, data, prev_mask=None, prev_data=None,

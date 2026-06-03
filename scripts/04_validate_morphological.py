@@ -28,19 +28,15 @@ from utils.hdf5_reader import load_xrf, get_composite_map
 from utils.roi_utils import sample_mask
 from utils.validation_utils import project_mask
 from utils.plotting import save_and_show
-from utils.paths import find_coarse, find_fine, require, PROJECT_ROOT
+from utils.cli import add_io_args
+from utils.paths import require, PROJECT_ROOT
 
 OUTPUT_DIR = PROJECT_ROOT / "outputs"
 
 
 def parse_args():
     p = argparse.ArgumentParser(description="Validate morphological sample mask")
-    dc, df = find_coarse(), find_fine()
-    p.add_argument("--coarse", default=str(dc) if dc else None,
-                   help="Coarse HDF5 (auto-detected from data/ if omitted)")
-    p.add_argument("--fine",   default=str(df) if df else None,
-                   help="Fine HDF5 ground truth (auto-detected if omitted)")
-    p.add_argument("--channels", default=None)
+    add_io_args(p)
     p.add_argument("--kernel",   default=2, type=int,
                    help="Morphological kernel size [coarse pixels] (default 2)")
     p.add_argument("--mode",     default="otsu_lower",
@@ -49,8 +45,6 @@ def parse_args():
     p.add_argument("--level",    default=50.0, type=float,
                    help="Percentile parameter for the chosen mode (default 50)")
     p.add_argument("--dwell",    default=10.0, type=float)
-    p.add_argument("--no-show",  action="store_true",
-                   help="Save figures without opening a window")
     return p.parse_args()
 
 

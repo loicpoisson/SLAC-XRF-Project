@@ -34,14 +34,12 @@ from utils.hdf5_reader import load_xrf, get_composite_map
 from utils.roi_utils import (sample_mask, threshold_map, label_rois,
                               get_bounding_boxes, group_rois, add_margin)
 from utils.validation_utils import project_mask
-from utils.cascade import find_level_file, refine_cascade
+from utils.cascade import find_level_file, refine_cascade, dwell_ms_from_path
 from utils.plotting import save_and_show
 
 PROJECT_ROOT = Path(__file__).parent.parent
 DATA_DIR     = PROJECT_ROOT / "data/Data_May2026"
 OUTPUT_DIR   = PROJECT_ROOT / "outputs"
-
-RES_TO_DWELL = {250: 10, 100: 10, 50: 10, 25: 10}   # all 10ms for UA1
 
 
 def parse_args():
@@ -78,6 +76,7 @@ def main():
     # ── Load all levels up front (coarse -> fine ordered list) ────────────
     scans = {}
     scans_list = []
+    dwell_by_px = {}          # real per-level dwell [ms], parsed from filenames
     channels = [c.strip() for c in args.channels.split(",")] if args.channels else None
     ref_channels = channels  # will fix to coarse's channels after level 0
 
@@ -96,7 +95,9 @@ def main():
                 print(f"  Excluded (constant): {excluded}")
         scans[px] = {"data": d, "comp": comp}
         scans_list.append({"data": d, "comp": comp, "px": px})
-        print(f"  Shape: {d['mapdata'].shape}  pixel: {d['dx']*1000:.0f}um")
+        dwell_by_px[px] = dwell_ms_from_path(path)
+        print(f"  Shape: {d['mapdata'].shape}  pixel: {d['dx']*1000:.0f}um  "
+              f"dwell: {dwell_by_px[px]:.0f}ms")
 
     fine_px      = levels[-1]
     fine         = scans[fine_px]["data"]
@@ -116,7 +117,7 @@ def main():
     for s in per_level_stats:
         s["area_pct"]      = s["area_frac"] * 100
         s["signal_in_pct"] = s["signal_in_frac"] * 100
-        s["dwell"]         = RES_TO_DWELL.get(s["px"], 10)
+        s["dwell"]         = dwell_by_px.get(s["px"], 10)
         s["time_ms"]       = s["n_in"] * s["dwell"]
 
     # ── Final-level ROI detection (k=1.0) inside the mask ─────────────────
@@ -138,7 +139,7 @@ def main():
     signal_captured = float(fine_comp[mask].sum()) / signal_total if signal_total else 0
     signal_missed   = 1.0 - signal_captured
 
-    raster_ms       = n_pix_total * RES_TO_DWELL[fine_px]
+    raster_ms       = n_pix_total * dwell_by_px[fine_px]
     total_cascade_ms = sum(s["time_ms"] for s in per_level_stats)
     speedup         = raster_ms / total_cascade_ms if total_cascade_ms else np.inf
 

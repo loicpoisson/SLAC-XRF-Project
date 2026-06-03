@@ -39,19 +39,15 @@ from utils.validation_utils import (project_mask, project_coarse_to_fine,
                                      compute_validation_metrics)
 from utils.dwell import allocate_dwell
 from utils.plotting import save_and_show
-from utils.paths import find_coarse, find_fine, require, PROJECT_ROOT
+from utils.cli import add_io_args
+from utils.paths import require, PROJECT_ROOT
 
 OUTPUT_DIR = PROJECT_ROOT / "outputs"
 
 
 def parse_args():
     p = argparse.ArgumentParser(description="Combined spatial+temporal adaptive scan")
-    dc, df = find_coarse(), find_fine()
-    p.add_argument("--coarse", default=str(dc) if dc else None,
-                   help="Coarse HDF5 (auto-detected from data/ if omitted)")
-    p.add_argument("--fine",   default=str(df) if df else None,
-                   help="Fine HDF5 ground truth (auto-detected if omitted)")
-    p.add_argument("--channels",   default=None)
+    add_io_args(p)
     # Spatial parameters (morpho)
     p.add_argument("--mode",       default="otsu_lower",
                    choices=["otsu_lower", "percentile", "otsu_clip"])
@@ -69,8 +65,6 @@ def parse_args():
     p.add_argument("--fine-dwell", default=10.0,  type=float,
                    help="Reference uniform dwell [ms] used by the raster baseline")
     p.add_argument("--setup-ms",   default=500.0, type=float)
-    p.add_argument("--no-show",     action="store_true",
-                   help="Save figures without opening a window")
     return p.parse_args()
 
 

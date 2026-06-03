@@ -75,6 +75,8 @@ def parse_args():
                    help="Stepwise resume: the level you JUST acquired")
     p.add_argument("--resume", default=None,
                    help="Stepwise resume: path to the cascade state .pkl")
+    p.add_argument("--force-level", action="store_true",
+                   help="Resume even if --scan resolution != the expected ladder level")
     p.add_argument("--simulate", action="store_true",
                    help="Run the full cascade offline using files on disk")
     p.add_argument("--sample", default=None,
@@ -509,6 +511,16 @@ def run_step(args):
         desc, strat = state["desc"], state["strategy"]
         sample = state["sample"]
         cur_px = px_um_of(data)
+        # Guard: the acquired scan must match the level this step expects, else the
+        # cascade silently mis-steps (project a mask onto the wrong grid).
+        if idx >= len(ladder):
+            raise SystemExit(f"Cascade already complete ({len(ladder)} levels). "
+                             f"Nothing left to scan.")
+        if cur_px != ladder[idx] and not args.force_level:
+            raise SystemExit(
+                f"--scan is {cur_px}um but step {idx} expects {ladder[idx]}um "
+                f"(ladder {ladder}). Provide the {ladder[idx]}um scan, or pass "
+                f"--force-level to override.")
         print(f"\n{'='*70}\n  XRF ITERATIVE PLANNER - STEP {idx} @ {cur_px}um  ({sample})"
               f"\n{'='*70}")
         print(f"  Resumed from {Path(args.resume).name}")
