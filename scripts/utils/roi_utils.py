@@ -256,10 +256,15 @@ def label_rois(mask, min_pixels=2, remove_border=False):
     clean = remove_border_pixels(mask) if remove_border else mask
     labeled, n_rois = ndimage.label(clean)
 
-    # discard regions smaller than min_pixels
-    for roi_id in range(1, n_rois + 1):
-        if (labeled == roi_id).sum() < min_pixels:
-            labeled[labeled == roi_id] = 0
+    # Discard regions smaller than min_pixels. Vectorized: np.bincount counts
+    # every label's size in a single O(P) pass; `remove[labeled]` then maps the
+    # per-label keep/drop decision back onto every pixel via fancy indexing.
+    # (Replaces an O(R*P) Python loop — critical at fine resolution, ~9000 ROIs.)
+    if n_rois > 0 and min_pixels > 1:
+        counts = np.bincount(labeled.ravel())
+        remove = counts < min_pixels
+        remove[0] = False                      # never remove the background label
+        labeled[remove[labeled]] = 0
 
     # re-label after removal
     labeled, n_rois = ndimage.label(labeled > 0)

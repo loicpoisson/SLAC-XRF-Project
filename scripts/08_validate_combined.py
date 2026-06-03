@@ -34,9 +34,11 @@ import numpy as np
 sys.path.insert(0, str(Path(__file__).parent))
 from utils.hdf5_reader import load_xrf, get_composite_map
 from utils.roi_utils import sample_mask
-from utils.validation_utils import (project_mask, _nearest_idx,
+from utils.validation_utils import (project_mask, project_coarse_to_fine,
                                      estimate_travel_overhead,
                                      compute_validation_metrics)
+from utils.dwell import allocate_dwell
+from utils.plotting import save_and_show
 from utils.paths import find_coarse, find_fine, require, PROJECT_ROOT
 
 OUTPUT_DIR = PROJECT_ROOT / "outputs"
@@ -58,7 +60,7 @@ def parse_args():
     p.add_argument("--kernel",     default=2, type=int)
     # Temporal parameters
     p.add_argument("--strategy",   default="binary",
-                   choices=["binary", "linear", "log"])
+                   choices=["binary", "linear", "log", "sqrt"])
     p.add_argument("--dwell-low",  default=1.0,   type=float)
     p.add_argument("--dwell-high", default=50.0,  type=float)
     p.add_argument("--threshold",  default=None,  type=float)
@@ -67,49 +69,9 @@ def parse_args():
     p.add_argument("--fine-dwell", default=10.0,  type=float,
                    help="Reference uniform dwell [ms] used by the raster baseline")
     p.add_argument("--setup-ms",   default=500.0, type=float)
+    p.add_argument("--no-show",     action="store_true",
+                   help="Save figures without opening a window")
     return p.parse_args()
-
-
-def project_coarse_to_fine(coarse_comp, coarse_data, fine_data):
-    ix = _nearest_idx(coarse_data["xdata"], fine_data["xdata"])
-    iy = _nearest_idx(coarse_data["ydata"], fine_data["ydata"])
-    IY, IX = np.meshgrid(iy, ix, indexing="ij")
-    return coarse_comp[IY, IX]
-
-
-def allocate_dwell(coarse_at_fine, strategy, dwell_low, dwell_high,
-                    threshold=None, mask=None):
-    """
-    Compute dwell for each fine pixel. Only meaningful where mask is True;
-    elsewhere the value is 0 (these pixels are not scanned).
-    Threshold computations use the in-mask distribution.
-    """
-    x = coarse_at_fine.astype(float)
-    in_mask_vals = x[mask] if mask is not None else x.ravel()
-
-    if strategy == "binary":
-        thr = threshold if threshold is not None else float(np.quantile(in_mask_vals, 0.75))
-        d = np.where(x > thr, dwell_high, dwell_low)
-        return d, thr
-
-    if strategy == "linear":
-        lo, hi = np.quantile(in_mask_vals, [0.05, 0.95])
-        if hi <= lo:
-            return np.full_like(x, (dwell_low + dwell_high) / 2), None
-        normed = np.clip((x - lo) / (hi - lo), 0, 1)
-        return dwell_low + normed * (dwell_high - dwell_low), None
-
-    if strategy == "log":
-        eps = 1.0
-        logx = np.log(np.maximum(x, eps))
-        in_mask_logs = logx[mask] if mask is not None else logx.ravel()
-        lo, hi = np.quantile(in_mask_logs, [0.05, 0.95])
-        if hi <= lo:
-            return np.full_like(x, (dwell_low + dwell_high) / 2), None
-        normed = np.clip((logx - lo) / (hi - lo), 0, 1)
-        return dwell_low + normed * (dwell_high - dwell_low), None
-
-    raise ValueError(f"Unknown strategy '{strategy}'")
 
 
 def main():
@@ -261,9 +223,7 @@ def main():
     if args.match_budget:
         tag += "_matched"
     outpath = OUTPUT_DIR / f"{Path(args.coarse).stem}_combined_{tag}.png"
-    plt.savefig(outpath, dpi=150, bbox_inches="tight")
-    print(f"\nFigure saved -> {outpath}")
-    plt.show()
+    save_and_show(fig, outpath, show=not args.no_show)
 
 
 if __name__ == "__main__":

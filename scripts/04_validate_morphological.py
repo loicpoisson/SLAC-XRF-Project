@@ -26,6 +26,8 @@ import numpy as np
 sys.path.insert(0, str(Path(__file__).parent))
 from utils.hdf5_reader import load_xrf, get_composite_map
 from utils.roi_utils import sample_mask
+from utils.validation_utils import project_mask
+from utils.plotting import save_and_show
 from utils.paths import find_coarse, find_fine, require, PROJECT_ROOT
 
 OUTPUT_DIR = PROJECT_ROOT / "outputs"
@@ -47,27 +49,9 @@ def parse_args():
     p.add_argument("--level",    default=50.0, type=float,
                    help="Percentile parameter for the chosen mode (default 50)")
     p.add_argument("--dwell",    default=10.0, type=float)
+    p.add_argument("--no-show",  action="store_true",
+                   help="Save figures without opening a window")
     return p.parse_args()
-
-
-def _nearest_idx(arr, vals):
-    """For each value in `vals`, return the index of the nearest entry in `arr`.
-    Handles ascending or descending `arr`."""
-    order = np.argsort(arr)
-    arr_s = arr[order]
-    pos   = np.clip(np.searchsorted(arr_s, vals), 0, len(arr_s) - 1)
-    left  = np.clip(pos - 1, 0, len(arr_s) - 1)
-    choose_left = np.abs(arr_s[left] - vals) < np.abs(arr_s[pos] - vals)
-    idx_sorted  = np.where(choose_left, left, pos)
-    return order[idx_sorted]
-
-
-def project_mask_to_fine(mask_coarse, xc, yc, xf, yf):
-    """Project a coarse-grid boolean mask onto the fine grid by nearest-neighbor."""
-    ix = _nearest_idx(xc, xf)
-    iy = _nearest_idx(yc, yf)
-    IY, IX = np.meshgrid(iy, ix, indexing="ij")
-    return mask_coarse[IY, IX]
 
 
 def main():
@@ -100,7 +84,7 @@ def main():
     print(f"  Shape  : {fine['mapdata'].shape}")
 
     # ── 3. Project coarse mask onto fine grid ────────────────────────────
-    mask_fine = project_mask_to_fine(
+    mask_fine = project_mask(
         mask_coarse,
         coarse["xdata"], coarse["ydata"],
         fine["xdata"],   fine["ydata"],
@@ -180,9 +164,7 @@ def main():
     plt.tight_layout()
     OUTPUT_DIR.mkdir(exist_ok=True)
     outpath = OUTPUT_DIR / f"{Path(args.coarse).stem}_morphological_k{args.kernel}.png"
-    plt.savefig(outpath, dpi=150, bbox_inches="tight")
-    print(f"\nFigure saved -> {outpath}")
-    plt.show()
+    save_and_show(fig, outpath, show=not args.no_show)
 
 
 if __name__ == "__main__":
