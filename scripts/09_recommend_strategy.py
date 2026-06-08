@@ -9,12 +9,15 @@ Descriptors:
   - concentration : signal_top10pct / signal_total (how concentrated the signal is)
   - dynamic_range : log10(max/median + 1)         (width of the distribution)
 
-Heuristic recommendation rules:
-  - sample_frac < 0.30              -> Spatial ROI (sparse sample, high possible gain)
-  - 0.30 < sample_frac < 0.70       -> Combined morpho + temporal
-  - sample_frac > 0.70              -> Pure temporal (spatial capped)
-  - concentration > 0.60            -> + binary dwell high/low
-  - dynamic_range > 2.5             -> + log strategy when linear would saturate
+Heuristic recommendation rules (single source: utils.strategy.choose_strategy):
+  - sample_frac < 0.30                       -> Spatial ROI (sparse, high gain)
+  - 0.30 < sample_frac < 0.70                -> Combined morpho + temporal
+  - sample_frac > 0.70 AND concentration>0.70 -> Combined (still helps when signal
+                                                is concentrated despite density)
+  - sample_frac > 0.70 (otherwise)           -> Pure temporal (spatial capped)
+  - concentration > 0.60                     -> + binary dwell high/low
+  - dynamic_range > 2.5                      -> + log strategy when linear saturates
+  - otherwise                                -> + linear dwell
 
 Usage:
     python scripts/09_recommend_strategy.py
@@ -26,11 +29,10 @@ import argparse
 import sys
 from pathlib import Path
 
-import numpy as np
-
 sys.path.insert(0, str(Path(__file__).parent))
 from utils.strategy import describe_sample, recommend
-from utils.paths import find_coarse, find_first, require, PROJECT_ROOT, DATA_DIR
+from utils.cascade import find_level_file
+from utils.paths import find_coarse, require
 
 
 def parse_args():
@@ -46,7 +48,8 @@ def parse_args():
 
 def coarse_path_for(sample, res_um):
     """Find the coarse HDF5 for a named sample stem (UA1_P1 etc.)."""
-    return find_first(f"*{sample}*{res_um}um*.hdf5")
+    # Delegate to find_level_file: its `_<px>um_` anchor avoids 50um matching 250um.
+    return find_level_file(sample, res_um)
 
 
 def print_report(desc):

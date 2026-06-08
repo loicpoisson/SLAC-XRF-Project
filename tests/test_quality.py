@@ -57,6 +57,19 @@ def test_bias_term_grows_when_bright_pixels_unscanned():
     assert mse_skipped["mse_adaptive"] > mse_scanned["mse_adaptive"]
 
 
+def test_montecarlo_handles_negative_signal():
+    # XRF fit residuals can produce slightly negative pixels; the Monte-Carlo
+    # path must clamp instead of crashing on rng.poisson(lam<0).
+    sig = np.full((8, 8), 50.0)
+    sig[0, 0] = -3.0                              # a negative pixel
+    sig[1, 1] = np.nan                            # and a NaN
+    dwell = np.full_like(sig, 10.0)
+    mask = np.ones_like(sig, dtype=bool)
+    res = poisson_mse_montecarlo(sig, dwell, mask, t_ref=10.0, predict="zero",
+                                 n_draws=20, seed=0)
+    assert np.isfinite(res["ratio"])
+
+
 def test_snr_map_formula():
     sig = np.array([[0.0, 4.0], [9.0, 16.0]])
     dwell = np.full_like(sig, 10.0)

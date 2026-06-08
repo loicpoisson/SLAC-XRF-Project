@@ -39,3 +39,14 @@ def test_unknown_strategy_raises():
     import pytest
     with pytest.raises(ValueError):
         allocate_dwell(np.arange(5.0), "nope", 1, 50)
+
+
+def test_empty_mask_does_not_crash():
+    # An all-False mask (e.g. a footprint that collapsed to zero pixels) must
+    # degrade gracefully instead of raising on an empty quantile pool.
+    x = np.arange(12.0).reshape(3, 4)
+    empty = np.zeros_like(x, dtype=bool)
+    for strat in ("binary", "linear", "log", "sqrt"):
+        d, thr = allocate_dwell(x, strat, 1.0, 50.0, mask=empty)
+        assert d.shape == x.shape
+        assert np.all(d == 1.0)

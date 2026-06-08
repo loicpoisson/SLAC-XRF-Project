@@ -32,7 +32,7 @@ import numpy as np
 sys.path.insert(0, str(Path(__file__).parent))
 from utils.hdf5_reader import load_xrf, get_composite_map
 from utils.roi_utils import (sample_mask, threshold_map, label_rois,
-                              get_bounding_boxes, group_rois, add_margin)
+                              get_bounding_boxes)
 from utils.validation_utils import project_mask
 from utils.cascade import find_level_file, refine_cascade, dwell_ms_from_path
 from utils.plotting import save_and_show

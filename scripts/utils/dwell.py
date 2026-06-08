@@ -36,6 +36,11 @@ def allocate_dwell(signal, strategy, dwell_low, dwell_high,
     x = signal.astype(float)
     pool = x[mask] if mask is not None else x.ravel()
 
+    if pool.size == 0:
+        # Empty mask (nothing to scan) -> degrade gracefully instead of letting
+        # np.quantile raise on an empty array.
+        return np.full_like(x, dwell_low), None
+
     if strategy == "binary":
         thr = threshold if threshold is not None else float(np.quantile(pool, 0.75))
         return np.where(x > thr, dwell_high, dwell_low), thr

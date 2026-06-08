@@ -43,4 +43,4 @@ def test_describe_sample_matches_describe_composite():
     a = describe_composite(comp)
     b = describe_sample(path)
     for k in ("sample_frac", "concentration", "dynamic_range", "sparsity"):
-        assert a[k] == pytest.approx(b[k])
+        assert a[k] == b[k]          # thin wrapper -> byte-identical, not just approx

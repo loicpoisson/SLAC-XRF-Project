@@ -60,6 +60,12 @@ def poisson_mse(true_signal, dwell_map, mask, t_ref=10.0,
     Returns
     -------
     dict: mse_raster, mse_adaptive, ratio, var_term, bias_term, area_frac
+
+    NOTE: `ratio` (raster/adaptive) is only the paper's equal-time figure of
+    merit when the caller has budget-matched the dwell map (sum of dwells ==
+    raster total). This function does NOT normalize time itself: feeding it a
+    dwell_map that simply spends more total time will inflate the ratio. Script
+    10 applies --match-budget before calling this; reuse it the same way.
     """
     r = true_signal.astype(float) / t_ref
     P = r.size
@@ -90,8 +96,13 @@ def poisson_mse_montecarlo(true_signal, dwell_map, mask, t_ref=10.0,
     Returns dict: mse_raster (mean,std), mse_adaptive (mean,std), ratio.
     """
     rng = np.random.default_rng(seed)
-    r = true_signal.astype(float) / t_ref
-    pred = _pred_rate(true_signal, t_ref, predict, predict_signal)
+    # Poisson rates must be finite and non-negative; XRF fit residuals can make a
+    # few pixels slightly negative. Clamp the rate used for sampling (and as the
+    # reference truth) so the Monte-Carlo path tolerates the same inputs the
+    # analytic path and snr_map do, instead of crashing on lam < 0 / NaN.
+    r = np.maximum(np.nan_to_num(true_signal.astype(float) / t_ref, nan=0.0), 0.0)
+    pred = np.maximum(np.nan_to_num(_pred_rate(true_signal, t_ref, predict,
+                                               predict_signal), nan=0.0), 0.0)
     t_safe = np.maximum(dwell_map, _EPS)
 
     adaptive, raster = np.empty(n_draws), np.empty(n_draws)

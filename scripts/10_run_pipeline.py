@@ -53,7 +53,7 @@ from utils.strategy import describe_composite, choose_strategy
 from utils.dwell import allocate_dwell
 from utils.cascade import find_level_file, available_levels, refine_step, refine_cascade
 from utils.roi_utils import label_rois, get_bounding_boxes, group_rois, add_margin
-from utils.validation_utils import coarse_blockmean
+from utils.validation_utils import coarse_blockmean, project_coarse_to_fine
 from utils.quality import poisson_mse, poisson_mse_montecarlo, mean_snr
 from utils.plotting import save_and_show
 from utils.paths import find_coarse, require, PROJECT_ROOT, DATA_DIR
@@ -207,6 +207,13 @@ def build_scan_plan(mask, dwell_map, grid, next_px_mm, *, group=True,
     if n == 0:
         return []
     raw = get_bounding_boxes(labeled, grid["xdata"], grid["ydata"])
+    # get_bounding_boxes counts `size` in CURRENT-grid pixels, but group_rois
+    # reasons about the gap in next_px (fine) pixels (the merged bbox is scanned
+    # at next_px). Convert size to fine-pixel units so n_gap = merged_fine - sizes
+    # is consistent; otherwise n_gap is hugely overestimated and nothing merges.
+    px_factor = (grid["dx"] / next_px_mm) * (grid["dy"] / next_px_mm)
+    for b in raw:
+        b["size"] = int(round(b["size"] * px_factor))
     med_dwell = float(np.median(dwell_map[mask])) if mask.any() else fine_dwell
     grouped = group_rois(raw, dwell_ms=med_dwell, dx=next_px_mm, dy=next_px_mm,
                          setup_ms=setup_ms)
@@ -479,7 +486,12 @@ def run_simulate(args):
 
     fine = scans_list[-1]
     coarse0 = scans_list[0]
-    mask_eff, dwell_map = make_dwell_map(fine["comp"], fine["data"], mask, strat, args)
+    # Dwell must be decided from the most informative ALREADY-ACQUIRED level
+    # (the one before the final), NOT from the fine truth — otherwise the dwell
+    # map "knows" the answer and the MSE/SNR validation is optimistically biased.
+    prev = scans_list[-2]
+    dwell_signal = project_coarse_to_fine(prev["comp"], prev["data"], fine["data"])
+    mask_eff, dwell_map = make_dwell_map(dwell_signal, fine["data"], mask, strat, args)
     next_px = fine["data"]["dx"]   # finest level scans at its own resolution
     if not args.no_match_budget and strat["method"] != "morpho":
         dwell_map = match_budget(dwell_map, mask_eff, fine["data"], next_px, args.fine_dwell)
@@ -536,7 +548,17 @@ def run_step(args):
         sample = args.sample or sample_hint_from_path(coarse_path) or Path(coarse_path).stem
         cur_px = px_um_of(data)
         ladder = resolve_ladder(args, sample, cur_px)
-        idx = ladder.index(cur_px) if cur_px in ladder else 0
+        # Guard: the coarse scan must be a level of the ladder, else the cascade
+        # is silently mislabeled (and every later --resume step is off by one).
+        if cur_px in ladder:
+            idx = ladder.index(cur_px)
+        elif args.force_level:
+            idx = 0
+        else:
+            raise SystemExit(
+                f"Coarse scan is {cur_px}um but the ladder is {ladder} "
+                f"(coarsest {ladder[0]}um). Pass --levels starting at {cur_px}um, "
+                f"or --force-level to treat it as the first level.")
         desc = describe_composite(comp)
         strat = resolve_strategy(desc, args.strategy, args.dwell_strategy)
         state = {"channels": used}
