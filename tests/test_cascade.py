@@ -4,7 +4,9 @@ import numpy as np
 import pytest
 
 from utils.cascade import dwell_ms_from_path, refine_step, available_levels
-from utils.validation_utils import coarse_blockmean, project_mask
+from utils.validation_utils import (coarse_blockmean, project_mask,
+                                     travel_overhead_from_centers,
+                                     estimate_travel_overhead)
 
 
 def test_dwell_ms_from_path():
@@ -60,3 +62,27 @@ def test_available_levels_ua1():
     if not lv:
         pytest.skip("UA1_P1 data not available")
     assert lv == [250, 100, 50, 25]
+
+
+def test_travel_overhead_edge_cases():
+    assert travel_overhead_from_centers(np.empty((0, 2)))["overhead_ms"] == 0.0
+    one = travel_overhead_from_centers(np.array([[0.0, 0.0]]), setup_ms=500.0)
+    assert one["travel_ms"] == 0.0 and one["overhead_ms"] == 500.0
+    two = travel_overhead_from_centers(np.array([[0.0, 0.0], [10.0, 0.0]]),
+                                       setup_ms=500.0)
+    assert two["n_regions"] == 2
+    assert two["travel_ms"] > 0.0            # a real jump costs time
+    assert two["overhead_ms"] > 1000.0       # travel + 2 * setup
+
+
+def test_estimate_travel_overhead_delegates_to_centers():
+    # mask-based and centers-based paths must agree on the same two regions.
+    mask = np.zeros((10, 10), dtype=bool)
+    mask[1, 1] = True
+    mask[8, 8] = True
+    x = np.arange(10.0)
+    em = estimate_travel_overhead(mask, x, x, setup_ms=500.0)
+    fc = travel_overhead_from_centers(np.array([[1.0, 1.0], [8.0, 8.0]]),
+                                      setup_ms=500.0)
+    assert em["n_regions"] == fc["n_regions"] == 2
+    assert np.isclose(em["travel_ms"], fc["travel_ms"])

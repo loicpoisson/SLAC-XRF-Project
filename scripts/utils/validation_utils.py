@@ -138,16 +138,34 @@ def estimate_travel_overhead(mask, x_grid, y_grid, setup_ms=500.0):
     """
     labeled, n = ndimage.label(mask)
     if n == 0:
+        return travel_overhead_from_centers(np.empty((0, 2)), setup_ms)
+    centers = np.zeros((n, 2))
+    for i in range(1, n + 1):
+        rows, cols = np.where(labeled == i)
+        centers[i - 1] = [x_grid[cols].mean(), y_grid[rows].mean()]
+    return travel_overhead_from_centers(centers, setup_ms)
+
+
+def travel_overhead_from_centers(centers, setup_ms=500.0):
+    """
+    Inter-region travel + setup overhead given the region CENTERS [mm].
+
+    The scanner visits the regions along a short tour (nearest-neighbor + 2-opt)
+    and jumps between them under the trapezoidal velocity profile, plus a fixed
+    `setup_ms` per region. This is the single source for the travel model: both
+    estimate_travel_overhead (mask-based) and the production planner (script 10,
+    plan-region-based) call it.
+
+    Returns dict: n_regions, travel_ms, setup_total_ms, overhead_ms (= travel+setup).
+    """
+    centers = np.asarray(centers, dtype=float).reshape(-1, 2)
+    n = len(centers)
+    if n == 0:
         return {"n_regions": 0, "travel_ms": 0.0, "setup_total_ms": 0.0,
                 "overhead_ms": 0.0}
     if n == 1:
         return {"n_regions": 1, "travel_ms": 0.0, "setup_total_ms": setup_ms,
                 "overhead_ms": setup_ms}
-
-    centers = np.zeros((n, 2))
-    for i in range(1, n + 1):
-        rows, cols = np.where(labeled == i)
-        centers[i - 1] = [x_grid[cols].mean(), y_grid[rows].mean()]
 
     tour = nearest_neighbor_tour(centers, start_idx=0)
     if len(tour) > 2:

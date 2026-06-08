@@ -53,7 +53,8 @@ from utils.strategy import describe_composite, choose_strategy
 from utils.dwell import allocate_dwell
 from utils.cascade import find_level_file, available_levels, refine_step, refine_cascade
 from utils.roi_utils import label_rois, get_bounding_boxes, group_rois, add_margin
-from utils.validation_utils import coarse_blockmean, project_coarse_to_fine
+from utils.validation_utils import (coarse_blockmean, project_coarse_to_fine,
+                                     travel_overhead_from_centers)
 from utils.quality import poisson_mse, poisson_mse_montecarlo, mean_snr
 from utils.plotting import save_and_show
 from utils.paths import find_coarse, require, PROJECT_ROOT, DATA_DIR
@@ -282,9 +283,16 @@ def emit_outputs(stem, comp, grid, mask, dwell_map, plan, strat, desc,
                  coarse_fill=None):
     """Print the report, save JSON + SMAK pickle + figure for one step.
     Returns the summary dict (so callers can log a cascade manifest)."""
-    # Time estimate
-    total_time_s = sum(r["dwell_uniform_ms"] * r["n_pixels_x"] * r["n_pixels_y"]
-                       for r in plan) / 1000.0 + len(plan) * args.setup_ms / 1000.0
+    # Time estimate = pixel dwell time + inter-region travel/setup overhead.
+    # The overhead uses the shared travel model (trapezoidal profile + per-region
+    # setup) over the ACTUAL scan regions' centers, instead of a flat per-region
+    # setup — single source of truth with scripts 03/04/06/08.
+    scan_time_s = sum(r["dwell_uniform_ms"] * r["n_pixels_x"] * r["n_pixels_y"]
+                      for r in plan) / 1000.0
+    centers = np.array([[(r["x_start_mm"] + r["x_end_mm"]) / 2.0,
+                         (r["y_start_mm"] + r["y_end_mm"]) / 2.0] for r in plan])
+    overhead = travel_overhead_from_centers(centers, setup_ms=args.setup_ms)
+    total_time_s = scan_time_s + overhead["overhead_ms"] / 1000.0
     w, h = full_area_mm(grid)
     nx_full = int(np.ceil(w / next_px_mm)) + 1
     ny_full = int(np.ceil(h / next_px_mm)) + 1
@@ -295,6 +303,8 @@ def emit_outputs(stem, comp, grid, mask, dwell_map, plan, strat, desc,
     print(f"    Regions to scan   : {len(plan)}")
     print(f"    Total fine pixels : ~{sum(r['n_pixels_x']*r['n_pixels_y'] for r in plan):,}")
     print(f"    Estimated time    : {total_time_s:.0f} s ({total_time_s/60:.1f} min)")
+    print(f"      travel + setup  : {overhead['overhead_ms']/1000:.1f} s  "
+          f"(travel {overhead['travel_ms']/1000:.1f}s over {overhead['n_regions']} regions)")
     print(f"    Raster baseline   : {raster_time_s:.0f} s ({raster_time_s/60:.1f} min)")
     print(f"    SPEEDUP           : {speedup:.2f}x")
 
@@ -346,7 +356,9 @@ def emit_outputs(stem, comp, grid, mask, dwell_map, plan, strat, desc,
         "strategy": strat,
         "next_px_mm": next_px_mm,
         "estimate": {"total_time_s": total_time_s, "raster_time_s": raster_time_s,
-                     "speedup": speedup, "n_regions": len(plan)},
+                     "speedup": speedup, "n_regions": len(plan),
+                     "travel_ms": overhead["travel_ms"],
+                     "setup_total_ms": overhead["setup_total_ms"]},
         "quality": quality,
         "cascade_levels": per_level_stats,
         "regions": plan,
