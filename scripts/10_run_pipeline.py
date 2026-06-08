@@ -30,8 +30,9 @@ B) SIMULATE (offline validation, when every level already exists on disk)
 Degenerate: `--coarse FILE` alone, with no cascade ladder, falls back to the
 single-shot plan at --fine-px (the original script-10 behavior).
 
-Outputs (per step): a text report, a JSON scan plan, a SMAK-compatible pickle,
-and a figure.
+Outputs (per step): a text report, a JSON scan plan, a SMAK-compatible pickle
+(rectangles at a uniform dwell = MEAN of the desired per-pixel dwells), the
+exact per-pixel dwell map (<stem>_dwell_map.npy), and a figure.
 """
 
 import argparse
@@ -146,12 +147,20 @@ def resolve_strategy(desc, forced, forced_dwell="auto"):
 
 
 def _region_dict(rid, x0, x1, y0, y1, dwell_vals, next_px_mm, fine_dwell):
-    """Assemble one scan-plan region (uniform = median dwell of its signal)."""
+    """
+    Assemble one scan-plan region. The scanner rasters the rectangle at ONE
+    dwell, so `dwell_uniform_ms` uses the MEAN of the desired per-pixel dwells:
+    that keeps the region's total time equal to the intended budget (the median
+    would collapse to the background level and drop the bright pixels). The exact
+    per-pixel dwell map is saved separately (<stem>_dwell_map.npy) for execution
+    on a scanner that supports a dwell map.
+    """
     if dwell_vals.size:
+        mean = float(dwell_vals.mean())
         med, lo, hi = (float(np.median(dwell_vals)),
                        float(dwell_vals.min()), float(dwell_vals.max()))
     else:
-        med = lo = hi = fine_dwell
+        mean = med = lo = hi = fine_dwell
     return {
         "region_id":        rid,
         "x_start_mm":       float(min(x0, x1)),
@@ -161,10 +170,11 @@ def _region_dict(rid, x0, x1, y0, y1, dwell_vals, next_px_mm, fine_dwell):
         "fine_px_mm":       next_px_mm,
         "n_pixels_x":       int(np.ceil(abs(x1 - x0) / next_px_mm)) + 1,
         "n_pixels_y":       int(np.ceil(abs(y1 - y0) / next_px_mm)) + 1,
+        "dwell_mean_ms":    mean,
         "dwell_median_ms":  med,
         "dwell_min_ms":     lo,
         "dwell_max_ms":     hi,
-        "dwell_uniform_ms": med,
+        "dwell_uniform_ms": mean,    # what the scanner actually uses
     }
 
 
@@ -377,6 +387,13 @@ def emit_outputs(stem, comp, grid, mask, dwell_map, plan, strat, desc,
     with open(pkl_path, "wb") as f:
         pickle.dump(smak_compat, f)
     print(f"  Pickle plan saved -> {pkl_path}")
+
+    # Exact per-pixel dwell map (0 = not scanned), on the current grid. The
+    # region .pkl above is a uniform-per-rectangle approximation; this preserves
+    # the true allocation for a scanner that can execute a dwell map.
+    npy_path = OUTPUT_DIR / f"{stem}_dwell_map.npy"
+    np.save(npy_path, np.where(mask, dwell_map, 0.0))
+    print(f"  Dwell map saved   -> {npy_path}")
 
     _save_figure(stem, comp, grid, mask, dwell_map, plan, strat, speedup,
                  total_time_s, args, show=not args.no_show)
