@@ -18,7 +18,7 @@
 - **At equal scan time, optimal temporal dwell improves image quality.** The MSE-optimal allocation is **t ∝ √signal** (`sqrt`); on UA1 it is the only strategy that beats a uniform raster (MSE ratio **1.10×**). This is the paper-2-style "same time, better image" result, and it works even on dense samples.
 - **Engineering:** single-source utility modules, a descriptor-based recommender, a Poisson-MSE quality metric, and a **39-test** suite.
 
-**Open questions for Sam are collected in §10.**
+**Open questions for Sam are collected in §10. Result figures are in §12.**
 
 ---
 
@@ -303,5 +303,52 @@ scripts/
     └── cli.py / paths.py  shared args / portable paths
 tests/   39 pytest tests (metric math, dwell, labeling, cascade, golden recommender)
 ```
+
+## 12. Results gallery
+
+Figures regenerated with the current code (reproduce via the §4 commands).
+Per-sample figures cover the three samples **UA1_P1, UB1_P1, FP1_P1**.
+
+### Which strategy per sample (recommender, script 09)
+All samples land in the dense region → temporal/combined (none is spatially sparse
+on the composite).
+
+![Strategy map](report_strategy_map.png)
+
+### Per-element sparsity — the headline (script 11)
+The composite is dense, but each element's signal sits in ~10–20 % of pixels:
+
+![Per-element UA1_P1](report_per_element_UA1_P1.png)
+![Per-element UB1_P1](report_per_element_UB1_P1.png)
+![Per-element FP1_P1](report_per_element_FP1_P1.png)
+
+### ROI detection + missed signal at coarse (script 03)
+Spatial ROI boxes on the coarse composite and the signal they would miss —
+illustrates subpixel averaging on dense samples:
+
+![Validation UA1_P1](SMW_UA1_P1_25um_10ms_12000_0_001_validation.png)
+![Validation UB1_P1](SMW_UB1_P1_25um_10ms_12000_0_001_validation.png)
+![Validation FP1_P1](SMW_FP1_P1_50um_10ms_12000_0_001_validation.png)
+
+### Scan trajectory (script 02)
+TSP path (nearest-neighbour + 2-opt) between regions; travel is <1 % of total time:
+
+![Trajectory UA1_P1](SMW_UA1_P1_250um_10ms_12000_0_001_trajectory.png)
+![Trajectory UB1_P1](SMW_UB1_P1_250um_10ms_12000_0_001_trajectory.png)
+![Trajectory FP1_P1](SMW_FP1_P1_250um_10ms_12000_0_001_trajectory.png)
+
+### Hierarchical cascade (script 05)
+Footprint refinement 250→100→50(→25) µm:
+
+![Cascade UA1_P1](UA1_P1_hierarchical_250_100_50_25.png)
+![Cascade UB1_P1](UB1_P1_hierarchical_250_100_50_25.png)
+![Cascade FP1_P1](FP1_P1_hierarchical_250_100_50.png)
+
+### Production scan plan (script 10, simulate)
+Footprint (cyan) + scan regions (lime) + allocated dwell map:
+
+![Scan plan UA1_P1](UA1_P1_simulate_scan_plan.png)
+![Scan plan UB1_P1](UB1_P1_simulate_scan_plan.png)
+![Scan plan FP1_P1](FP1_P1_simulate_scan_plan.png)
 
 *End of report (v2).*
