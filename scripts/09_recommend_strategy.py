@@ -26,13 +26,14 @@ Usage:
 """
 
 import argparse
+import re
 import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
-from utils.strategy import describe_sample, recommend
+from utils.strategy import describe_sample, recommend, choose_strategy
 from utils.cascade import find_level_file
-from utils.paths import find_coarse, require
+from utils.paths import find_coarse, require, DATA_DIR, PROJECT_ROOT
 
 
 def parse_args():
@@ -43,7 +44,66 @@ def parse_args():
     p.add_argument("--batch", nargs="+", default=None,
                    help="Run on multiple sample stems (e.g. UA1_P1 UB1_P1 FP1_P1)")
     p.add_argument("--res-um", default=250, type=int, help="Coarse resolution [um]")
+    p.add_argument("--plot", action="store_true",
+                   help="Save the strategy map (sample_frac x concentration, "
+                        "coloured by recommended method) over all/--batch samples")
     return p.parse_args()
+
+
+def _discover_stems():
+    """All sample stems present under data/ (e.g. UA1_P1, FP1_1x1, ...)."""
+    stems = set()
+    for f in DATA_DIR.rglob("*um_*.hdf5"):
+        m = re.match(r"SMW_(.+?)_\d+um_", f.name)
+        if m:
+            stems.add(m.group(1))
+    return sorted(stems)
+
+
+def plot_strategy_map(samples, res_um=250):
+    """Scatter sample_frac x concentration, coloured by recommended method,
+    with the recommender's decision regions. Shows 'which strategy when'."""
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    colors = {"roi": "#2ca02c", "combined": "#ff7f0e", "temporal": "#1f77b4"}
+    pts = []
+    for s in samples:
+        path = coarse_path_for(s, res_um)
+        if path is None or not path.exists():
+            continue
+        d = describe_sample(path)
+        pts.append((s, d["sample_frac"], d["concentration"], choose_strategy(d)["method"]))
+    if not pts:
+        raise SystemExit("No samples found to plot.")
+
+    fig, ax = plt.subplots(figsize=(7.5, 5.5))
+    ax.axvspan(0, 0.30, color="#2ca02c", alpha=0.06)
+    ax.axvspan(0.30, 0.70, color="#ff7f0e", alpha=0.06)
+    ax.axvspan(0.70, 1.0, color="#1f77b4", alpha=0.06)
+    ax.axvline(0.30, color="gray", ls=":", lw=1)
+    ax.axvline(0.70, color="gray", ls=":", lw=1)
+    ax.axhline(0.70, color="gray", ls="--", lw=1)
+    seen = set()
+    for s, sf, c, meth in pts:
+        ax.scatter(sf, c, s=70, color=colors.get(meth, "k"), edgecolor="k", zorder=3,
+                   label=meth if meth not in seen else None)
+        seen.add(meth)
+        ax.annotate(s, (sf, c), textcoords="offset points", xytext=(5, 4), fontsize=7)
+    ax.set_xlabel("sample_frac  (occupied area)")
+    ax.set_ylabel("concentration  (signal in top-10% pixels)")
+    ax.set_title("Recommended strategy per sample\n"
+                 "(green<30% ROI | 30-70% combined | >70% temporal, "
+                 "or combined if concentration>70%)")
+    ax.set_xlim(0, 1); ax.set_ylim(0, 1.02)
+    ax.legend(title="method", fontsize=8)
+    fig.tight_layout()
+    out = PROJECT_ROOT / "outputs" / "report_strategy_map.png"
+    out.parent.mkdir(exist_ok=True)
+    fig.savefig(out, dpi=150, bbox_inches="tight")
+    plt.close(fig)
+    print(f"  saved -> {out}  ({len(pts)} samples)")
 
 
 def coarse_path_for(sample, res_um):
@@ -75,6 +135,10 @@ def print_report(desc):
 
 def main():
     args = parse_args()
+
+    if args.plot:
+        plot_strategy_map(args.batch or _discover_stems(), args.res_um)
+        return
 
     if args.batch:
         for sample in args.batch:

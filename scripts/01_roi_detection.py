@@ -122,7 +122,10 @@ def plot_results(data, channel_label, composite, mask, thresh, labeled, boxes, a
 
     plt.tight_layout()
     OUTPUT_DIR.mkdir(exist_ok=True)
-    tag = "all" if "all elements" in channel_label else channel_label.replace(".", "_").replace(" ", "")
+    # Sanitize the tag: channel labels can contain ':' '+' '.' (e.g. a channel
+    # sum), which are illegal in Windows filenames. Keep it short and safe.
+    tag = ("all" if "all elements" in channel_label else
+           "".join(ch if ch.isalnum() else "_" for ch in channel_label).strip("_")[:40])
     outpath = OUTPUT_DIR / f"{Path(args.file).stem}_roi_{tag}.png"
     plt.savefig(outpath, dpi=150, bbox_inches="tight")
     print(f"Figure saved -> {outpath}")
