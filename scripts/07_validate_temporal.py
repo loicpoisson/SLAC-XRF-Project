@@ -38,6 +38,7 @@ sys.path.insert(0, str(Path(__file__).parent))
 from utils.hdf5_reader import load_xrf, get_composite_map
 from utils.validation_utils import project_coarse_to_fine
 from utils.dwell import allocate_dwell
+from utils.quality import poisson_mse
 from utils.plotting import save_and_show
 from utils.cli import add_io_args
 from utils.paths import require, PROJECT_ROOT
@@ -147,6 +148,15 @@ def main():
     print(f"  Signal*dwell adaptive        : {signal_photons_adaptive:.3e}")
     print(f"  Adaptive/raster (info ratio) : "
           f"{signal_photons_adaptive/signal_photons_raster:>6.2f}x")
+
+    # Paper-aligned reconstruction MSE at EQUAL time (budget-matched copy of the
+    # dwell map): the honest "same time, better image" figure of merit. Only the
+    # sqrt allocation (t proportional to sqrt(signal)) beats the raster here.
+    full = np.ones_like(fine_comp, dtype=bool)
+    dwell_eq = dwell_map_ms * (dwell_map_ms.size * args.fine_dwell / dwell_map_ms.sum())
+    mse = poisson_mse(fine_comp, dwell_eq, full, t_ref=args.fine_dwell, predict="zero")
+    print(f"  Poisson MSE ratio (equal time): {mse['ratio']:>6.2f}x  "
+          f"(>1 = adaptive better; this is the paper-2 metric)")
     print(f"")
     print(f"  Time on top-10% brightest pixels:")
     print(f"    Raster   : {bright_time_frac_raster*100:>5.1f}%  ({bright_time_raster/1000:.1f}s)")

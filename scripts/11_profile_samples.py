@@ -23,7 +23,8 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent))
 from utils.hdf5_reader import load_xrf, get_composite_map, list_element_channels
 from utils.strategy import describe_composite, choose_strategy
-from utils.paths import DATA_DIR
+from utils.cascade import find_level_file
+from utils.paths import DATA_DIR, PROJECT_ROOT
 
 
 def discover_samples():
@@ -111,12 +112,63 @@ def profile_composite(samples):
           "(<30% sparse, 30-70% medium, >70% dense).")
 
 
+def plot_per_element(sample, px=250):
+    """Bar chart of bright-pixel fraction per element vs the composite presence.
+    The figure the v2 report uses to show 'composite dense, elements sparse'."""
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    import numpy as np
+
+    fp = find_level_file(sample, px)
+    if fp is None:
+        raise SystemExit(f"No {px}um scan for {sample} under {DATA_DIR}")
+    d = load_xrf(fp)
+    comp, _, _ = get_composite_map(d)
+    comp_frac = describe_composite(comp)["sample_frac"]
+
+    els, fracs = [], []
+    for ch in list_element_channels(d):
+        arr = d["mapdata"][:, :, d["labels"].index(ch)].astype(float)
+        if arr.min() == arr.max():
+            continue
+        els.append(ch.replace(".Ka", "").replace(".La", ""))
+        fracs.append(describe_composite(arr)["sparsity"])
+    order = np.argsort(fracs)
+    els = [els[i] for i in order]
+    fracs = [fracs[i] * 100 for i in order]
+
+    fig, ax = plt.subplots(figsize=(max(7, 0.45 * len(els)), 4.2))
+    ax.bar(els, fracs, color="#1f77b4")
+    ax.axhline(comp_frac * 100, color="#d62728", ls="--", lw=1.5,
+               label=f"composite presence (sample_frac) = {comp_frac*100:.0f}%")
+    ax.axhline(30, color="gray", ls=":", lw=1, label="sparse threshold (30%)")
+    ax.set_ylabel("bright-pixel fraction  [%]")
+    ax.set_title(f"{sample} ({px}um): each element is sparse (hot spots ~10-20%)\n"
+                 f"while the composite is dense ({comp_frac*100:.0f}% occupied)")
+    ax.legend(fontsize=8)
+    plt.setp(ax.get_xticklabels(), rotation=45, ha="right", fontsize=8)
+    fig.tight_layout()
+    out = PROJECT_ROOT / "outputs" / f"report_per_element_{sample}.png"
+    out.parent.mkdir(exist_ok=True)
+    fig.savefig(out, dpi=150, bbox_inches="tight")
+    plt.close(fig)
+    print(f"  saved -> {out}")
+
+
 def main():
     p = argparse.ArgumentParser(description="Profile samples by sparsity")
     p.add_argument("--per-element", action="store_true",
                    help="Break each sample down per element channel (the composite "
                         "can be dense while a single element is sparse)")
+    p.add_argument("--plot", action="store_true",
+                   help="Save the per-element bright-fraction figure for --sample")
+    p.add_argument("--sample", default="UA1_P1",
+                   help="Sample stem for --plot (default UA1_P1)")
     args = p.parse_args()
+    if args.plot:
+        plot_per_element(args.sample)
+        return
     samples = discover_samples()
     if args.per_element:
         print(f"\nPer-element sparsity under {DATA_DIR} (coarsest scan):\n")

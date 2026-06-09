@@ -134,6 +134,24 @@ speedup against the fine ground truth.
 
 The refinement primitive (`refine_step`) is identical in both modes.
 
+### Run it
+```bash
+# production, step by step (resume between real acquisitions)
+python scripts/10_run_pipeline.py --coarse data/.../UA1_P1_250um....hdf5
+python scripts/10_run_pipeline.py --scan data/.../UA1_P1_100um....hdf5 \
+       --resume outputs/UA1_P1_cascade_state.pkl
+python scripts/10_run_pipeline.py --coarse <coarse>.hdf5 --channels Ti.Ka   # single element
+
+# offline validation (all resolutions present)
+python scripts/10_run_pipeline.py --simulate --sample UA1_P1 [--dwell-strategy sqrt]
+
+# sparsity profiling, temporal MSE, tests
+python scripts/11_profile_samples.py [--per-element] [--plot --sample UA1_P1]
+python scripts/07_validate_temporal.py --strategy sqrt
+python -m pytest tests/ -q
+```
+The full command reference is in the [README](../README.md).
+
 ---
 
 ## 5. Scripts (what, why, what we learned)
@@ -168,6 +186,10 @@ coarse estimate — Poisson MSE:**
 | linear | 0.59× | 1.63× |
 | log | 0.58× | 1.45× |
 | binary | 0.15× | 1.60× |
+
+(Reproduce: `python scripts/10_run_pipeline.py --simulate --sample UA1_P1 --dwell-strategy sqrt`.
+Script 07 also prints an equal-time Poisson-MSE ratio for a single strategy — slightly
+different, as it allocates dwell from the 250 µm coarse rather than the 50 µm level.)
 
 **Reading this:** the analytic and Monte-Carlo MSE agree. Only `sqrt` beats the
 raster in MSE — exactly the water-filling optimum derived in §3. The
@@ -212,6 +234,13 @@ concentrated:
 | FP1_P1 | Zn.Ka | 10.8 % | 80 % |
 | UA1_P1 | Al.Ka | 12.7 % | 72 % |
 | UA1_P1 | Ti.Ka | 15.0 % | 57 % |
+
+→ **Figure:** `outputs/report_per_element_UA1_P1.png`
+(`scripts/11_profile_samples.py --plot --sample UA1_P1`).
+
+> Note: the other PNGs under `outputs/` (`*_temporal_*`, `pareto_*`, …) are from
+> the v1 analysis and predate the Poisson-MSE correction; the figures referenced
+> in this report are the current ones.
 
 Since XRF imaging usually targets **specific elements**, this is precisely where
 spatial adaptive should win (scan ~15 % of the area for one element).
