@@ -31,6 +31,38 @@ def project_mask(mask_src, x_src, y_src, x_dst, y_dst):
     return mask_src[IY, IX]
 
 
+def project_coarse_to_fine(coarse_comp, coarse_data, fine_data):
+    """Replicate each coarse pixel value to its corresponding fine pixels."""
+    ix = _nearest_idx(coarse_data["xdata"], fine_data["xdata"])
+    iy = _nearest_idx(coarse_data["ydata"], fine_data["ydata"])
+    IY, IX = np.meshgrid(iy, ix, indexing="ij")
+    return coarse_comp[IY, IX]
+
+
+def coarse_blockmean(fine_comp, coarse_data, fine_data):
+    """
+    Block-average the FINE composite onto the coarse grid, then expand back to
+    the fine grid. The result is the idealized coarse-resolution view of the
+    truth: for each fine pixel, the mean fine value over the coarse cell that
+    contains it.
+
+    Why not the raw coarse scan? A coarse pixel integrates more signal than a
+    fine pixel, so the two maps live on different intensity scales (~3x here);
+    comparing them directly inflates errors. The block-mean is same-scale by
+    construction, so (blockmean - fine)^2 isolates exactly the sub-coarse-pixel
+    detail lost by NOT scanning finely — the correct fill for the MSE bias term.
+    """
+    ix = _nearest_idx(coarse_data["xdata"], fine_data["xdata"])   # fine col -> coarse col
+    iy = _nearest_idx(coarse_data["ydata"], fine_data["ydata"])   # fine row -> coarse row
+    nx_c, ny_c = len(coarse_data["xdata"]), len(coarse_data["ydata"])
+    cell = (iy[:, None] * nx_c + ix[None, :]).ravel()             # coarse-cell id per fine px
+    n_cells = nx_c * ny_c
+    sums = np.bincount(cell, weights=fine_comp.ravel(), minlength=n_cells)
+    cnts = np.bincount(cell, minlength=n_cells)
+    means = sums / np.maximum(cnts, 1)
+    return means[cell].reshape(fine_comp.shape)
+
+
 def compute_validation_metrics(mask_fine, fine_comp, fine_dwell_ms=10.0,
                                 coarse_overhead_ms=0.0,
                                 travel_overhead_ms=0.0):
@@ -106,16 +138,34 @@ def estimate_travel_overhead(mask, x_grid, y_grid, setup_ms=500.0):
     """
     labeled, n = ndimage.label(mask)
     if n == 0:
+        return travel_overhead_from_centers(np.empty((0, 2)), setup_ms)
+    centers = np.zeros((n, 2))
+    for i in range(1, n + 1):
+        rows, cols = np.where(labeled == i)
+        centers[i - 1] = [x_grid[cols].mean(), y_grid[rows].mean()]
+    return travel_overhead_from_centers(centers, setup_ms)
+
+
+def travel_overhead_from_centers(centers, setup_ms=500.0):
+    """
+    Inter-region travel + setup overhead given the region CENTERS [mm].
+
+    The scanner visits the regions along a short tour (nearest-neighbor + 2-opt)
+    and jumps between them under the trapezoidal velocity profile, plus a fixed
+    `setup_ms` per region. This is the single source for the travel model: both
+    estimate_travel_overhead (mask-based) and the production planner (script 10,
+    plan-region-based) call it.
+
+    Returns dict: n_regions, travel_ms, setup_total_ms, overhead_ms (= travel+setup).
+    """
+    centers = np.asarray(centers, dtype=float).reshape(-1, 2)
+    n = len(centers)
+    if n == 0:
         return {"n_regions": 0, "travel_ms": 0.0, "setup_total_ms": 0.0,
                 "overhead_ms": 0.0}
     if n == 1:
         return {"n_regions": 1, "travel_ms": 0.0, "setup_total_ms": setup_ms,
                 "overhead_ms": setup_ms}
-
-    centers = np.zeros((n, 2))
-    for i in range(1, n + 1):
-        rows, cols = np.where(labeled == i)
-        centers[i - 1] = [x_grid[cols].mean(), y_grid[rows].mean()]
 
     tour = nearest_neighbor_tour(centers, start_idx=0)
     if len(tour) > 2:

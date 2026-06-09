@@ -32,15 +32,14 @@ import numpy as np
 sys.path.insert(0, str(Path(__file__).parent))
 from utils.hdf5_reader import load_xrf, get_composite_map
 from utils.roi_utils import (sample_mask, threshold_map, label_rois,
-                              get_bounding_boxes, group_rois, add_margin)
+                              get_bounding_boxes)
+from utils.validation_utils import project_mask
+from utils.cascade import find_level_file, refine_cascade, dwell_ms_from_path
+from utils.plotting import save_and_show
 
 PROJECT_ROOT = Path(__file__).parent.parent
 DATA_DIR     = PROJECT_ROOT / "data/Data_May2026"
 OUTPUT_DIR   = PROJECT_ROOT / "outputs"
-
-# Map "resolution in um" -> file path stem (UA1_P1 series)
-FILE_TEMPLATE = "SMW_UA1_P1_{px}um_{dw}ms_12000_0_001.hdf5"
-RES_TO_DWELL = {250: 10, 100: 10, 50: 10, 25: 10}   # all 10ms for UA1
 
 
 def parse_args():
@@ -59,38 +58,9 @@ def parse_args():
                    help="ROI detection sensitivity at FINAL level (default 1.0)")
     p.add_argument("--min-px",   default=1, type=int)
     p.add_argument("--channels", default=None)
+    p.add_argument("--no-show",  action="store_true",
+                   help="Save figures without opening a window")
     return p.parse_args()
-
-
-def _nearest_idx(arr, vals):
-    order = np.argsort(arr)
-    arr_s = arr[order]
-    pos   = np.clip(np.searchsorted(arr_s, vals), 0, len(arr_s) - 1)
-    left  = np.clip(pos - 1, 0, len(arr_s) - 1)
-    choose_left = np.abs(arr_s[left] - vals) < np.abs(arr_s[pos] - vals)
-    return order[np.where(choose_left, left, pos)]
-
-
-def project_mask(mask_src, x_src, y_src, x_dst, y_dst):
-    """Project a binary mask from one rectilinear grid to another (nearest)."""
-    ix = _nearest_idx(x_src, x_dst)
-    iy = _nearest_idx(y_src, y_dst)
-    IY, IX = np.meshgrid(iy, ix, indexing="ij")
-    return mask_src[IY, IX]
-
-
-def find_data_file(sample, px_um):
-    """Locate the HDF5 file for a given resolution. Tries several naming conventions."""
-    candidates = [
-        DATA_DIR / FILE_TEMPLATE.format(px=px_um, dw=RES_TO_DWELL.get(px_um, 10)),
-        DATA_DIR / f"SMW_{sample}_{px_um}um_10ms_12000_0_001.hdf5",
-        DATA_DIR / f"SMW_{sample}_{px_um}um_25ms_12000_0_001.hdf5",
-    ]
-    for path in candidates:
-        if path.exists():
-            return path
-    raise FileNotFoundError(f"No HDF5 found for sample={sample} resolution={px_um}um. "
-                             f"Tried: {[str(c) for c in candidates]}")
 
 
 def main():
@@ -103,13 +73,18 @@ def main():
     print(f"Sample: {args.sample}")
     print(f"Levels: {' -> '.join(f'{p}um' for p in levels)}")
 
-    # ── Load all levels up front ──────────────────────────────────────────
+    # ── Load all levels up front (coarse -> fine ordered list) ────────────
     scans = {}
+    scans_list = []
+    dwell_by_px = {}          # real per-level dwell [ms], parsed from filenames
     channels = [c.strip() for c in args.channels.split(",")] if args.channels else None
     ref_channels = channels  # will fix to coarse's channels after level 0
 
     for i, px in enumerate(levels):
-        path = find_data_file(args.sample, px)
+        path = find_level_file(args.sample, px, data_dir=DATA_DIR)
+        if path is None:
+            raise FileNotFoundError(f"No HDF5 found for sample={args.sample} "
+                                     f"resolution={px}um under {DATA_DIR}")
         print(f"\nLevel {i} ({px}um): loading {path.name}")
         d = load_xrf(path)
         comp, used, excluded = get_composite_map(d, ref_channels)
@@ -119,72 +94,31 @@ def main():
             if excluded:
                 print(f"  Excluded (constant): {excluded}")
         scans[px] = {"data": d, "comp": comp}
-        print(f"  Shape: {d['mapdata'].shape}  pixel: {d['dx']*1000:.0f}um")
+        scans_list.append({"data": d, "comp": comp, "px": px})
+        dwell_by_px[px] = dwell_ms_from_path(path)
+        print(f"  Shape: {d['mapdata'].shape}  pixel: {d['dx']*1000:.0f}um  "
+              f"dwell: {dwell_by_px[px]:.0f}ms")
 
     fine_px      = levels[-1]
     fine         = scans[fine_px]["data"]
     fine_comp    = scans[fine_px]["comp"]
     signal_total = float(fine_comp.sum())
 
-    # ── Iterate cascade ───────────────────────────────────────────────────
-    mask = None
-    per_level_stats = []
-    cumul_pixels    = 0
-    cumul_signal    = 0.0   # signal contributed at this level (not used downstream)
+    # ── Iterate cascade (shared utils.cascade.refine_cascade) ─────────────
+    # detect_final=False reproduces the original behavior: the finest level only
+    # projects the previous mask (ROI detection happens below, not a re-detection).
+    print(f"\n--- refining footprint across levels ---")
+    mask, per_level_stats = refine_cascade(
+        scans_list, kernel_px=args.kernel, mode=args.mode, level=args.level,
+        detect_final=False, verbose=True,
+    )
 
-    for i, px in enumerate(levels):
-        d    = scans[px]["data"]
-        comp = scans[px]["comp"]
-
-        if i == 0:
-            # First level: sample_mask on full composite
-            m, thresh = sample_mask(comp, kernel_px=args.kernel,
-                                    mode=args.mode, level=args.level,
-                                    verbose=True)
-            print(f"\nLevel 0 ({px}um): {args.mode} threshold = {thresh:.1f}")
-        elif i < len(levels) - 1:
-            # Intermediate: project previous mask -> sample_mask restricted to it
-            prev_px = levels[i - 1]
-            prev_d  = scans[prev_px]["data"]
-            mask_here = project_mask(mask, prev_d["xdata"], prev_d["ydata"],
-                                     d["xdata"], d["ydata"])
-            m, thresh = sample_mask(comp, kernel_px=args.kernel,
-                                    mode=args.mode, level=args.level,
-                                    restrict_to=mask_here, verbose=True)
-            print(f"\nLevel {i} ({px}um): {args.mode} threshold = {thresh:.1f}")
-        else:
-            # FINAL level: project previous mask onto fine grid; ROI detection
-            # happens on the fine composite below, restricted to this mask.
-            prev_px = levels[i - 1]
-            prev_d  = scans[prev_px]["data"]
-            m = project_mask(mask, prev_d["xdata"], prev_d["ydata"],
-                             d["xdata"], d["ydata"])
-            thresh = None
-            print(f"\nLevel {i} ({px}um, FINAL): projected previous mask onto fine grid")
-
-        n_in     = int(m.sum())
-        n_tot    = m.size
-        sig_in   = float(comp[m].sum())
-        sig_pct  = sig_in / float(comp.sum()) * 100 if comp.sum() > 0 else 0
-        print(f"  Pixels in mask : {n_in}/{n_tot}  ({n_in/n_tot*100:.1f}%)")
-        print(f"  Signal in mask : {sig_pct:.1f}% of this level's total")
-
-        # Time at this level = n_in pixels * level dwell
-        dwell = RES_TO_DWELL.get(px, 10)
-        level_time_ms = n_in * dwell
-        per_level_stats.append({
-            "px":            px,
-            "shape":         d["mapdata"].shape,
-            "n_in":          n_in,
-            "n_tot":         n_tot,
-            "area_pct":      n_in / n_tot * 100,
-            "signal_in_pct": sig_pct,
-            "dwell":         dwell,
-            "time_ms":       level_time_ms,
-            "threshold":     thresh if i < len(levels) - 1 else None,
-        })
-
-        mask = m
+    # Augment generic stats with 05-specific dwell/time + percentage aliases.
+    for s in per_level_stats:
+        s["area_pct"]      = s["area_frac"] * 100
+        s["signal_in_pct"] = s["signal_in_frac"] * 100
+        s["dwell"]         = dwell_by_px.get(s["px"], 10)
+        s["time_ms"]       = s["n_in"] * s["dwell"]
 
     # ── Final-level ROI detection (k=1.0) inside the mask ─────────────────
     print(f"\n=== FINAL ROI DETECTION (level {fine_px}um, k={args.k}) ===")
@@ -205,7 +139,7 @@ def main():
     signal_captured = float(fine_comp[mask].sum()) / signal_total if signal_total else 0
     signal_missed   = 1.0 - signal_captured
 
-    raster_ms       = n_pix_total * RES_TO_DWELL[fine_px]
+    raster_ms       = n_pix_total * dwell_by_px[fine_px]
     total_cascade_ms = sum(s["time_ms"] for s in per_level_stats)
     speedup         = raster_ms / total_cascade_ms if total_cascade_ms else np.inf
 
@@ -288,9 +222,7 @@ def main():
     OUTPUT_DIR.mkdir(exist_ok=True)
     label = "_".join(str(p) for p in levels)
     outpath = OUTPUT_DIR / f"{args.sample}_hierarchical_{label}.png"
-    plt.savefig(outpath, dpi=150, bbox_inches="tight")
-    print(f"\nFigure saved -> {outpath}")
-    plt.show()
+    save_and_show(fig, outpath, show=not args.no_show)
 
 
 if __name__ == "__main__":

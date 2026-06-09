@@ -36,23 +36,22 @@ import numpy as np
 
 sys.path.insert(0, str(Path(__file__).parent))
 from utils.hdf5_reader import load_xrf, get_composite_map
-from utils.validation_utils import project_mask, _nearest_idx
-from utils.paths import find_coarse, find_fine, require, PROJECT_ROOT
+from utils.validation_utils import project_coarse_to_fine
+from utils.dwell import allocate_dwell
+from utils.quality import poisson_mse
+from utils.plotting import save_and_show
+from utils.cli import add_io_args
+from utils.paths import require, PROJECT_ROOT
 
 OUTPUT_DIR = PROJECT_ROOT / "outputs"
 
 
 def parse_args():
     p = argparse.ArgumentParser(description="Temporal adaptive (dwell-variable) validation")
-    dc, df = find_coarse(), find_fine()
-    p.add_argument("--coarse", default=str(dc) if dc else None,
-                   help="Coarse HDF5 (auto-detected from data/ if omitted)")
-    p.add_argument("--fine",   default=str(df) if df else None,
-                   help="Fine HDF5 ground truth (auto-detected if omitted)")
-    p.add_argument("--channels",   default=None)
+    add_io_args(p)
     p.add_argument("--strategy",   default="linear",
-                   choices=["binary", "linear", "log"],
-                   help="Dwell allocation strategy")
+                   choices=["binary", "linear", "log", "sqrt"],
+                   help="Dwell allocation strategy ('sqrt' = MSE-optimal shape)")
     p.add_argument("--dwell-low",  default=1.0,   type=float,
                    help="Minimum dwell [ms]  (background pixels)")
     p.add_argument("--dwell-high", default=100.0, type=float,
@@ -66,47 +65,6 @@ def parse_args():
                    help="Scale the dwell map so the total time matches the "
                         "raster baseline (fair comparison at equal time)")
     return p.parse_args()
-
-
-def project_coarse_to_fine(coarse_comp, coarse_data, fine_data):
-    """Replicate each coarse pixel value to its corresponding fine pixels."""
-    ix = _nearest_idx(coarse_data["xdata"], fine_data["xdata"])
-    iy = _nearest_idx(coarse_data["ydata"], fine_data["ydata"])
-    IY, IX = np.meshgrid(iy, ix, indexing="ij")
-    return coarse_comp[IY, IX]
-
-
-def allocate_dwell(coarse_signal_at_fine, strategy, dwell_low, dwell_high,
-                    threshold=None):
-    """
-    Compute the per-pixel dwell array given a strategy and a coarse-signal map.
-
-    Returns
-    -------
-    dwell : float array, same shape as input, values in ms
-    """
-    x = coarse_signal_at_fine.astype(float)
-    if strategy == "binary":
-        thr = threshold if threshold is not None else np.quantile(x, 0.75)
-        return np.where(x > thr, dwell_high, dwell_low), thr
-
-    if strategy == "linear":
-        lo, hi = np.quantile(x, [0.05, 0.95])
-        if hi <= lo:
-            return np.full_like(x, (dwell_low + dwell_high) / 2), None
-        normed = np.clip((x - lo) / (hi - lo), 0, 1)
-        return dwell_low + normed * (dwell_high - dwell_low), None
-
-    if strategy == "log":
-        eps = 1.0
-        logx = np.log(np.maximum(x, eps))
-        lo, hi = np.quantile(logx, [0.05, 0.95])
-        if hi <= lo:
-            return np.full_like(x, (dwell_low + dwell_high) / 2), None
-        normed = np.clip((logx - lo) / (hi - lo), 0, 1)
-        return dwell_low + normed * (dwell_high - dwell_low), None
-
-    raise ValueError(f"Unknown strategy '{strategy}'")
 
 
 def main():
@@ -190,6 +148,15 @@ def main():
     print(f"  Signal*dwell adaptive        : {signal_photons_adaptive:.3e}")
     print(f"  Adaptive/raster (info ratio) : "
           f"{signal_photons_adaptive/signal_photons_raster:>6.2f}x")
+
+    # Paper-aligned reconstruction MSE at EQUAL time (budget-matched copy of the
+    # dwell map): the honest "same time, better image" figure of merit. Only the
+    # sqrt allocation (t proportional to sqrt(signal)) beats the raster here.
+    full = np.ones_like(fine_comp, dtype=bool)
+    dwell_eq = dwell_map_ms * (dwell_map_ms.size * args.fine_dwell / dwell_map_ms.sum())
+    mse = poisson_mse(fine_comp, dwell_eq, full, t_ref=args.fine_dwell, predict="zero")
+    print(f"  Poisson MSE ratio (equal time): {mse['ratio']:>6.2f}x  "
+          f"(>1 = adaptive better; this is the paper-2 metric)")
     print(f"")
     print(f"  Time on top-10% brightest pixels:")
     print(f"    Raster   : {bright_time_frac_raster*100:>5.1f}%  ({bright_time_raster/1000:.1f}s)")
@@ -237,9 +204,7 @@ def main():
     plt.tight_layout()
     OUTPUT_DIR.mkdir(exist_ok=True)
     outpath = OUTPUT_DIR / f"{Path(args.coarse).stem}_temporal_{args.strategy}.png"
-    plt.savefig(outpath, dpi=150, bbox_inches="tight")
-    print(f"\nFigure saved -> {outpath}")
-    plt.show()
+    save_and_show(fig, outpath, show=not args.no_show)
 
 
 if __name__ == "__main__":
