@@ -309,46 +309,103 @@ tests/   39 pytest tests (metric math, dwell, labeling, cascade, golden recommen
 Figures regenerated with the current code (reproduce via the §4 commands).
 Per-sample figures cover the three samples **UA1_P1, UB1_P1, FP1_P1**.
 
-### Which strategy per sample (recommender, script 09)
-All samples land in the dense region → temporal/combined (none is spatially sparse
-on the composite).
+### 12.1 Which strategy per sample (recommender, script 09)
+Each point is one sample, placed by **occupied area** (x = `sample_frac`) and
+**concentration** (y), and coloured by the **recommended method**. The shaded
+bands are the decision regions (green <30 % ROI, orange 30 to 70 % combined,
+blue >70 % temporal, with combined kept above 70 % when concentration >70 %).
 
 ![Strategy map](report_strategy_map.png)
+*Every sample falls in the dense band (x > 0.70), so the recommender picks
+temporal or combined. None of our samples is spatially sparse on the composite,
+which is exactly why spatial speedup is capped here.*
 
-### Per-element sparsity — the headline (script 11)
-The composite is dense, but each element's signal sits in ~10–20 % of pixels:
+### 12.2 Per-element sparsity, the headline finding (script 11)
+Each bar is one element's **bright-pixel fraction** (fraction of pixels above the
+matrix level). The red dashed line is the **composite** presence (`sample_frac`).
+The gap between them is the whole point: the composite is dense, but each element
+lives in a small fraction of pixels.
 
 ![Per-element UA1_P1](report_per_element_UA1_P1.png)
-![Per-element UB1_P1](report_per_element_UB1_P1.png)
-![Per-element FP1_P1](report_per_element_FP1_P1.png)
+*UA1_P1: composite is 77 % occupied, yet most elements (Al ~13 %, Ti ~15 %,
+V ~16 %) sit in well under 20 % of pixels, i.e. they are individually sparse.*
 
-### ROI detection + missed signal at coarse (script 03)
-Spatial ROI boxes on the coarse composite and the signal they would miss —
-illustrates subpixel averaging on dense samples:
+![Per-element UB1_P1](report_per_element_UB1_P1.png)
+*UB1_P1: composite 80 % occupied; elements such as Al ~12 %, V ~12 %, Ti ~15 %
+are sparse hot spots.*
+
+![Per-element FP1_P1](report_per_element_FP1_P1.png)
+*FP1_P1: composite 75 % occupied; Zn ~11 %, Al ~11 %, Ti ~13 %, Cr ~14 %. The
+single-element sparsity is the regime where adaptive scanning should win.*
+
+### 12.3 Naive coarse-ROI baseline = the PROBLEM (script 03)
+**This is the baseline that motivates the rest of the pipeline, not a final
+result.** ROIs are detected on the coarse 250 µm composite, then checked against
+the fine ground truth. Three panels, left to right:
+**(left)** fine scan with the detected coarse ROIs as cyan boxes;
+**(middle)** the "adaptive view", i.e. only the pixels that would be scanned;
+**(right)** the **missed signal**, the bright points that fall outside the boxes.
+The large missed fraction is **subpixel averaging**: a 25 µm particle is diluted
+~100:1 in its 250 µm coarse pixel, so it does not stand out and is not detected.
+The footprint, temporal and per-element methods (below / earlier) are what fix this.
 
 ![Validation UA1_P1](SMW_UA1_P1_25um_10ms_12000_0_001_validation.png)
-![Validation UB1_P1](SMW_UB1_P1_25um_10ms_12000_0_001_validation.png)
-![Validation FP1_P1](SMW_FP1_P1_50um_10ms_12000_0_001_validation.png)
+*UA1_P1: 209 ROIs, 29.7 % of pixels scanned, only 44 % of the signal captured
+(56 % missed). The right panel shows the missed fine particles scattered between
+the boxes. Diffuse sample, worst case for coarse ROI.*
 
-### Scan trajectory (script 02)
-TSP path (nearest-neighbour + 2-opt) between regions; travel is <1 % of total time:
+![Validation UB1_P1](SMW_UB1_P1_25um_10ms_12000_0_001_validation.png)
+*UB1_P1: 251 ROIs, 28 % scanned, 48 % captured (52 % missed). Same story as UA1.*
+
+![Validation FP1_P1](SMW_FP1_P1_50um_10ms_12000_0_001_validation.png)
+*FP1_P1: 394 ROIs, 40 % scanned, 70 % captured (30 % missed). Misses less because
+the signal is more concentrated (73 %) and the fine grid is 50 µm (less dilution).*
+
+### 12.4 Scan trajectory (script 02)
+The order in which the scanner visits the regions, built with a nearest-neighbour
+tour then 2-opt. Lines are the stage path between region centres.
 
 ![Trajectory UA1_P1](SMW_UA1_P1_250um_10ms_12000_0_001_trajectory.png)
-![Trajectory UB1_P1](SMW_UB1_P1_250um_10ms_12000_0_001_trajectory.png)
-![Trajectory FP1_P1](SMW_FP1_P1_250um_10ms_12000_0_001_trajectory.png)
+*UA1_P1: optimised tour over the ROI regions. Path length matters little here:
+travel is <1 % of total scan time (dwell dominates), so this is a minor lever.*
 
-### Hierarchical cascade (script 05)
-Footprint refinement 250→100→50(→25) µm:
+![Trajectory UB1_P1](SMW_UB1_P1_250um_10ms_12000_0_001_trajectory.png)
+*UB1_P1: same, travel negligible vs dwell.*
+
+![Trajectory FP1_P1](SMW_FP1_P1_250um_10ms_12000_0_001_trajectory.png)
+*FP1_P1: same.*
+
+### 12.5 Hierarchical cascade (script 05)
+One panel per resolution level (250 to 25 µm). The cyan contour is the sample
+footprint at that level; each level only scans inside the previous mask, so the
+mask should tighten as resolution improves. The last panel is the final ROIs.
 
 ![Cascade UA1_P1](UA1_P1_hierarchical_250_100_50_25.png)
-![Cascade UB1_P1](UB1_P1_hierarchical_250_100_50_25.png)
-![Cascade FP1_P1](FP1_P1_hierarchical_250_100_50.png)
+*UA1_P1: footprint barely shrinks (90 % to 76 % over the four levels) and captures
+79 % of the signal, but the cascade ends up ~as slow as a direct fine raster on
+this dense sample. Refinement only helps when the mask actually tightens.*
 
-### Production scan plan (script 10, simulate)
-Footprint (cyan) + scan regions (lime) + allocated dwell map:
+![Cascade UB1_P1](UB1_P1_hierarchical_250_100_50_25.png)
+*UB1_P1: same behaviour, dense footprint, little spatial gain.*
+
+![Cascade FP1_P1](FP1_P1_hierarchical_250_100_50.png)
+*FP1_P1: cascade 250 to 50 µm (no 25 µm scan for P1).*
+
+### 12.6 Production scan plan (script 10, simulate)
+The actual pipeline output. **(left)** coarse composite with the sample footprint
+(cyan contour) and the scan regions (lime boxes); **(right)** the per-pixel
+**dwell map** allocated inside the footprint (brighter = longer dwell).
 
 ![Scan plan UA1_P1](UA1_P1_simulate_scan_plan.png)
+*UA1_P1: recommender picks temporal/log, so the footprint is the full frame and
+the dwell map concentrates time on the bright pixels (equal-time quality play,
+not a speed play).*
+
 ![Scan plan UB1_P1](UB1_P1_simulate_scan_plan.png)
+*UB1_P1: also temporal, dwell concentrated on the brightest regions.*
+
 ![Scan plan FP1_P1](FP1_P1_simulate_scan_plan.png)
+*FP1_P1: recommender picks combined (dense but concentrated), so the plan keeps a
+spatial footprint plus a variable dwell inside it.*
 
 *End of report (v2).*
