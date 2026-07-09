@@ -67,11 +67,15 @@ def poisson_mse(true_signal, dwell_map, mask, t_ref=10.0,
     dwell_map that simply spends more total time will inflate the ratio. Script
     10 applies --match-budget before calling this; reuse it the same way.
     """
-    r = true_signal.astype(float) / t_ref
+    # Same input sanitation as the Monte-Carlo path: XRF fit residuals can
+    # leave NaN or slightly negative pixels; a NaN inside the mask would poison
+    # every term, and negative rates would silently REDUCE var_term.
+    r = np.maximum(np.nan_to_num(true_signal.astype(float) / t_ref, nan=0.0), 0.0)
     P = r.size
 
     var_term = np.where(mask, r / np.maximum(dwell_map, _EPS), 0.0).sum()
-    pred = _pred_rate(true_signal, t_ref, predict, predict_signal)
+    pred = np.maximum(np.nan_to_num(
+        _pred_rate(true_signal, t_ref, predict, predict_signal), nan=0.0), 0.0)
     bias_term = np.where(~mask, (pred - r) ** 2, 0.0).sum()
 
     mse_adaptive = (var_term + bias_term) / P
@@ -96,23 +100,25 @@ def poisson_mse_montecarlo(true_signal, dwell_map, mask, t_ref=10.0,
     Returns dict: mse_raster (mean,std), mse_adaptive (mean,std), ratio.
     """
     rng = np.random.default_rng(seed)
-    # Poisson rates must be finite and non-negative; XRF fit residuals can make a
-    # few pixels slightly negative. Clamp the rate used for sampling (and as the
-    # reference truth) so the Monte-Carlo path tolerates the same inputs the
-    # analytic path and snr_map do, instead of crashing on lam < 0 / NaN.
+    # Poisson rates must be finite and non-negative; XRF fit residuals can make
+    # a few pixels slightly negative. Clamp the rate used for sampling (and as
+    # the reference truth), same as the analytic path and snr_map, instead of
+    # crashing on lam < 0 / NaN.
     r = np.maximum(np.nan_to_num(true_signal.astype(float) / t_ref, nan=0.0), 0.0)
     pred = np.maximum(np.nan_to_num(_pred_rate(true_signal, t_ref, predict,
                                                predict_signal), nan=0.0), 0.0)
     t_safe = np.maximum(dwell_map, _EPS)
+    lam_adaptive = np.where(mask, r * t_safe, 0.0)
+    lam_raster   = r * t_ref
 
     adaptive, raster = np.empty(n_draws), np.empty(n_draws)
     for d in range(n_draws):
         # adaptive: scanned pixels measured at t_i, unscanned filled with pred
-        N = rng.poisson(np.where(mask, r * t_safe, 0.0))
+        N = rng.poisson(lam_adaptive)
         rhat = np.where(mask, N / t_safe, pred)
         adaptive[d] = np.mean((rhat - r) ** 2)
         # raster: everything at t_ref
-        N_r = rng.poisson(r * t_ref)
+        N_r = rng.poisson(lam_raster)
         raster[d] = np.mean((N_r / t_ref - r) ** 2)
 
     ma, mr = adaptive.mean(), raster.mean()

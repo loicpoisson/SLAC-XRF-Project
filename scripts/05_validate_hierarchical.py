@@ -114,18 +114,22 @@ def main():
     )
 
     # Augment generic stats with 05-specific dwell/time + percentage aliases.
+    # Time is charged on the pixels ACQUIRED at each level (n_scanned: full
+    # frame at level 0, projected previous mask afterwards), not on the refined
+    # mask (n_in) — charging n_in undercounts the cascade and inflates speedup.
     for s in per_level_stats:
         s["area_pct"]      = s["area_frac"] * 100
         s["signal_in_pct"] = s["signal_in_frac"] * 100
         s["dwell"]         = dwell_by_px.get(s["px"], 10)
-        s["time_ms"]       = s["n_in"] * s["dwell"]
+        s["time_ms"]       = s["n_scanned"] * s["dwell"]
 
     # ── Final-level ROI detection (k=1.0) inside the mask ─────────────────
+    # Threshold statistics come from the in-mask pixels only (mask=mask):
+    # zero-filling the out-of-footprint pixels instead would collapse the
+    # robust statistics (median/MAD -> 0) and flag the whole footprint as ROI.
     print(f"\n=== FINAL ROI DETECTION (level {fine_px}um, k={args.k}) ===")
-    comp_in_mask = np.where(mask, fine_comp, 0.0)
-    # apply threshold_map on full composite but restrict mask intersection
     roi_mask_raw, thresh_roi, method_used = threshold_map(
-        comp_in_mask, method="auto", k=args.k,
+        fine_comp, method="auto", k=args.k, mask=mask,
     )
     roi_mask_final = roi_mask_raw & mask
     labeled, _ = label_rois(roi_mask_final, min_pixels=args.min_px)
@@ -144,10 +148,12 @@ def main():
     speedup         = raster_ms / total_cascade_ms if total_cascade_ms else np.inf
 
     print(f"\n=== CASCADE SUMMARY ===")
-    print(f"  {'level':>6}  {'shape':>16}  {'in mask':>10}  {'%area':>7}  {'%signal':>8}  {'time (s)':>9}")
+    print(f"  {'level':>6}  {'shape':>16}  {'scanned':>10}  {'in mask':>10}  "
+          f"{'%area':>7}  {'%signal':>8}  {'time (s)':>9}")
     for s in per_level_stats:
         print(f"  {s['px']:>4}um  {str(s['shape']):>16}  "
-              f"{s['n_in']:>10,}  {s['area_pct']:>6.1f}%  {s['signal_in_pct']:>7.1f}%  "
+              f"{s['n_scanned']:>10,}  {s['n_in']:>10,}  "
+              f"{s['area_pct']:>6.1f}%  {s['signal_in_pct']:>7.1f}%  "
               f"{s['time_ms']/1000:>8.1f}")
     print(f"")
     print(f"  Final signal captured (at {fine_px}um) : {signal_captured*100:.1f}%")

@@ -49,8 +49,9 @@ def parse_args():
                    choices=["auto", "mad", "trimmed", "iqr", "sigma"])
     p.add_argument("--k",         default=1.0,  type=float)
     p.add_argument("--min-px",    default=1,    type=int)
-    p.add_argument("--dwell",     default=25.0, type=float,
-                   help="Fine scan dwell time per pixel [ms]")
+    p.add_argument("--dwell",     default=10.0, type=float,
+                   help="Fine scan dwell time per pixel [ms] (default: 10, "
+                        "same baseline as scripts 03/04/06/07/08/10)")
     p.add_argument("--fine-px",   default=0.025, type=float,
                    help="Fine scan pixel size [mm]")
     p.add_argument("--setup-ms",  default=500.0, type=float,
@@ -182,10 +183,11 @@ def main():
 
     boxes = group_rois(
         boxes,
-        dwell_ms  = args.dwell,
-        dx        = args.fine_px,
-        dy        = args.fine_px,
-        setup_ms  = args.setup_ms,
+        dwell_ms   = args.dwell,
+        dx         = args.fine_px,
+        dy         = args.fine_px,
+        setup_ms   = args.setup_ms,
+        size_px_mm = (data["dx"], data["dy"]),   # sizes are coarse-grid pixels
     )
     print(f"After grouping: {len(boxes)} ROI(s)")
     boxes_raw = boxes   # keep un-margined copy for plotting

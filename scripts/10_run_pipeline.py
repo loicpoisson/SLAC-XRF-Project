@@ -39,7 +39,6 @@ import argparse
 import csv
 import json
 import pickle
-import re
 import sys
 from pathlib import Path
 
@@ -58,7 +57,8 @@ from utils.validation_utils import (coarse_blockmean, project_coarse_to_fine,
                                      travel_overhead_from_centers)
 from utils.quality import poisson_mse, poisson_mse_montecarlo, mean_snr
 from utils.plotting import save_and_show
-from utils.paths import find_coarse, require, PROJECT_ROOT, DATA_DIR
+from utils.paths import (find_coarse, require, sample_hint_from_path,
+                         PROJECT_ROOT, DATA_DIR)
 
 OUTPUT_DIR = PROJECT_ROOT / "outputs"
 
@@ -122,12 +122,6 @@ def parse_args():
 
 
 # ── helpers ───────────────────────────────────────────────────────────────────
-
-def sample_hint_from_path(path):
-    """Extract a sample stem like 'UA1_P1' from a SMAK filename, else None."""
-    m = re.search(r"SMW_(.+?)_\d+um_", Path(path).name)
-    return m.group(1) if m else None
-
 
 def px_um_of(data):
     """Pixel size of a scan in microns (int)."""
@@ -218,16 +212,11 @@ def build_scan_plan(mask, dwell_map, grid, next_px_mm, *, group=True,
     if n == 0:
         return []
     raw = get_bounding_boxes(labeled, grid["xdata"], grid["ydata"])
-    # get_bounding_boxes counts `size` in CURRENT-grid pixels, but group_rois
-    # reasons about the gap in next_px (fine) pixels (the merged bbox is scanned
-    # at next_px). Convert size to fine-pixel units so n_gap = merged_fine - sizes
-    # is consistent; otherwise n_gap is hugely overestimated and nothing merges.
-    px_factor = (grid["dx"] / next_px_mm) * (grid["dy"] / next_px_mm)
-    for b in raw:
-        b["size"] = int(round(b["size"] * px_factor))
     med_dwell = float(np.median(dwell_map[mask])) if mask.any() else fine_dwell
+    # size_px_mm: get_bounding_boxes counts `size` in CURRENT-grid pixels;
+    # group_rois converts them to next_px (fine) units for the gap cost.
     grouped = group_rois(raw, dwell_ms=med_dwell, dx=next_px_mm, dy=next_px_mm,
-                         setup_ms=setup_ms)
+                         setup_ms=setup_ms, size_px_mm=(grid["dx"], grid["dy"]))
     boxed = add_margin(grouped, coarse_px_mm=grid["dx"], fine_px_mm=next_px_mm,
                        n_fine=margin_fine)
     plan = []
@@ -269,15 +258,22 @@ def make_dwell_map(comp, grid, mask, strat, args):
     return mask_eff, dwell_map
 
 
+def raster_time_ms(grid, next_px_mm, fine_dwell):
+    """Full-frame raster baseline [ms] at next_px_mm resolution.
+    Single definition shared by match_budget and emit_outputs, so the budget
+    matching and the reported speedup always use the same baseline."""
+    w, h = full_area_mm(grid)
+    nx_full = int(np.ceil(w / next_px_mm)) + 1
+    ny_full = int(np.ceil(h / next_px_mm)) + 1
+    return nx_full * ny_full * fine_dwell
+
+
 def match_budget(dwell_map, mask_eff, grid, next_px_mm, fine_dwell):
     """
     Scale in-mask dwells so the total adaptive time equals the raster baseline
     at next_px_mm (guarantees speedup >= 1). Returns the scaled dwell_map.
     """
-    w, h = full_area_mm(grid)
-    nx_full = int(np.ceil(w / next_px_mm)) + 1
-    ny_full = int(np.ceil(h / next_px_mm)) + 1
-    raster_total_ms = nx_full * ny_full * fine_dwell
+    raster_total_ms = raster_time_ms(grid, next_px_mm, fine_dwell)
 
     replicas = (grid["dx"] / next_px_mm) * (grid["dy"] / next_px_mm)
     current_total_ms = float((dwell_map * mask_eff).sum()) * replicas
@@ -303,10 +299,7 @@ def emit_outputs(stem, comp, grid, mask, dwell_map, plan, strat, desc,
                          (r["y_start_mm"] + r["y_end_mm"]) / 2.0] for r in plan])
     overhead = travel_overhead_from_centers(centers, setup_ms=args.setup_ms)
     total_time_s = scan_time_s + overhead["overhead_ms"] / 1000.0
-    w, h = full_area_mm(grid)
-    nx_full = int(np.ceil(w / next_px_mm)) + 1
-    ny_full = int(np.ceil(h / next_px_mm)) + 1
-    raster_time_s = nx_full * ny_full * args.fine_dwell / 1000.0
+    raster_time_s = raster_time_ms(grid, next_px_mm, args.fine_dwell) / 1000.0
     speedup = raster_time_s / total_time_s if total_time_s > 0 else np.inf
 
     print(f"\n  === SCAN PLAN (next level @ {next_px_mm*1000:.0f}um) ===")
@@ -327,7 +320,11 @@ def emit_outputs(stem, comp, grid, mask, dwell_map, plan, strat, desc,
         mse = poisson_mse(ground_truth_comp, dwell_map, mask,
                           t_ref=args.fine_dwell, predict=predict,
                           predict_signal=coarse_fill)
-        snr_ad = mean_snr(ground_truth_comp, dwell_map, t_ref=args.fine_dwell)
+        # Zero the dwell outside the scan footprint (same as the saved .npy):
+        # unscanned pixels must contribute zero SNR, otherwise the gain is
+        # overstated for sparse footprints (and pinned at 1.0x for morpho).
+        snr_ad = mean_snr(ground_truth_comp, np.where(mask, dwell_map, 0.0),
+                          t_ref=args.fine_dwell)
         snr_ras = mean_snr(ground_truth_comp,
                            np.full_like(dwell_map, args.fine_dwell),
                            t_ref=args.fine_dwell)
@@ -476,6 +473,29 @@ def _append_manifest(sample, idx, px_um, strat, summary, fresh=False):
 
 # ── modes ─────────────────────────────────────────────────────────────────────
 
+def plan_and_emit(dwell_signal, comp, grid, mask, strat, desc, next_px, stem,
+                  args, **gt_kwargs):
+    """
+    Shared planning tail for BOTH modes: dwell map -> optional budget match ->
+    scan plan -> outputs. Keeping this in one place guarantees the offline
+    simulation validates exactly the plan the stepwise (beamline) mode emits.
+
+    `dwell_signal` is the interest estimate the dwells are computed from (the
+    current composite in stepwise mode; the projected previous level in
+    simulate mode, so the dwell map never "knows" the fine truth).
+    """
+    mask_eff, dwell_map = make_dwell_map(dwell_signal, grid, mask, strat, args)
+    if not args.no_match_budget and strat["method"] != "morpho":
+        dwell_map = match_budget(dwell_map, mask_eff, grid, next_px,
+                                 args.fine_dwell)
+    plan = build_scan_plan(mask_eff, dwell_map, grid, next_px,
+                           group=(strat["method"] != "temporal"),
+                           setup_ms=args.setup_ms, margin_fine=args.margin_fine,
+                           fine_dwell=args.fine_dwell)
+    return emit_outputs(stem, comp, grid, mask_eff, dwell_map, plan, strat,
+                        desc, next_px, args, **gt_kwargs)
+
+
 def run_simulate(args):
     sample = args.sample or sample_hint_from_path(args.coarse_pos or args.coarse or "")
     if not sample:
@@ -520,22 +540,15 @@ def run_simulate(args):
     # map "knows" the answer and the MSE/SNR validation is optimistically biased.
     prev = scans_list[-2]
     dwell_signal = project_coarse_to_fine(prev["comp"], prev["data"], fine["data"])
-    mask_eff, dwell_map = make_dwell_map(dwell_signal, fine["data"], mask, strat, args)
     next_px = fine["data"]["dx"]   # finest level scans at its own resolution
-    if not args.no_match_budget and strat["method"] != "morpho":
-        dwell_map = match_budget(dwell_map, mask_eff, fine["data"], next_px, args.fine_dwell)
-    plan = build_scan_plan(mask_eff, dwell_map, fine["data"], next_px,
-                           group=(strat["method"] != "temporal"),
-                           setup_ms=args.setup_ms, margin_fine=args.margin_fine,
-                           fine_dwell=args.fine_dwell)
     # Fill for unscanned pixels in the MSE bias term = the fine truth block-
     # averaged to coarse resolution (same intensity scale; the raw coarse scan
     # sits on a different scale, see utils.validation_utils.coarse_blockmean).
     coarse_fill = coarse_blockmean(fine["comp"], coarse0["data"], fine["data"])
-    emit_outputs(f"{sample}_simulate", fine["comp"], fine["data"], mask_eff,
-                 dwell_map, plan, strat, desc, next_px, args,
-                 ground_truth_comp=fine["comp"], per_level_stats=per_level_stats,
-                 coarse_fill=coarse_fill)
+    plan_and_emit(dwell_signal, fine["comp"], fine["data"], mask, strat, desc,
+                  next_px, f"{sample}_simulate", args,
+                  ground_truth_comp=fine["comp"], per_level_stats=per_level_stats,
+                  coarse_fill=coarse_fill)
 
 
 def run_step(args):
@@ -606,26 +619,19 @@ def run_step(args):
 
     next_px = next_px_mm_for(ladder, idx, args, cur_px)
     final_level = idx + 1 >= len(ladder) and len(ladder) > 1
-    mask_eff, dwell_map = make_dwell_map(comp, data, mask, strat, args)
-    if not args.no_match_budget and strat["method"] != "morpho":
-        dwell_map = match_budget(dwell_map, mask_eff, data, next_px, args.fine_dwell)
-    plan = build_scan_plan(mask_eff, dwell_map, data, next_px,
-                           group=(strat["method"] != "temporal"),
-                           setup_ms=args.setup_ms, margin_fine=args.margin_fine,
-                           fine_dwell=args.fine_dwell)
     # Per-step stem so each level's plan is archived (not overwritten).
     stem = f"{sample}_step{idx}_{cur_px}um"
-    summary = emit_outputs(stem, comp, data, mask_eff, dwell_map, plan, strat,
-                           desc, next_px, args)
+    summary = plan_and_emit(comp, comp, data, mask, strat, desc, next_px,
+                            stem, args)
     _append_manifest(sample, idx, cur_px, strat, summary, fresh=not args.resume)
 
     # Persist state so the next acquired level can resume this cascade.
+    # ('channels' is already in the state dict from step 0 / the previous resume.)
     if not final_level:
         state.update({
             "sample": sample, "ladder": ladder, "done_idx": idx,
-            "channels": state["channels"], "desc": desc, "strategy": strat,
+            "desc": desc, "strategy": strat,
             "mask": mask, "xdata": data["xdata"], "ydata": data["ydata"],
-            "px_um": cur_px,
         })
         state_path = OUTPUT_DIR / f"{sample}_cascade_state.pkl"
         OUTPUT_DIR.mkdir(exist_ok=True)

@@ -32,7 +32,9 @@ from utils.roi_utils import (sample_mask, threshold_map, label_rois,
                               get_bounding_boxes, group_rois, add_margin)
 from utils.validation_utils import (project_mask, compute_validation_metrics,
                                      load_and_compose, estimate_travel_overhead)
-from utils.paths import find_first, PROJECT_ROOT, DATA_DIR
+from utils.cascade import find_level_file
+from utils.plotting import save_and_show
+from utils.paths import PROJECT_ROOT, DATA_DIR
 
 OUTPUT_DIR = PROJECT_ROOT / "outputs"
 
@@ -56,26 +58,22 @@ def parse_args():
                    help="Per-region overhead (positioning, triggering) [ms]")
     p.add_argument("--fine-um",  default=25, type=int,
                    help="Fine resolution to use as ground truth [um] (25 or 50)")
+    p.add_argument("--no-show",  action="store_true",
+                   help="Save figures without opening a window")
     return p.parse_args()
 
 
 def coarse_path(sample, px_um=COARSE_PX_UM):
-    """Find a coarse HDF5 for the given sample stem and resolution."""
-    return find_first(f"*{sample}*{px_um}um*.hdf5") or (
-        DATA_DIR / f"SMW_{sample}_{px_um}um_10ms_12000_0_001.hdf5"
-    )
-
-
-def fine_path(sample, px_um=FINE_PX_UM):
-    """Find a fine HDF5 for the given sample stem and resolution."""
-    return find_first(f"*{sample}*{px_um}um*.hdf5") or (
+    """Find a coarse HDF5 for the given sample stem and resolution
+    (find_level_file anchors `_<px>um_` so 50 never matches '250um')."""
+    return find_level_file(sample, px_um) or (
         DATA_DIR / f"SMW_{sample}_{px_um}um_10ms_12000_0_001.hdf5"
     )
 
 
 def fine_path_with_fallback(sample, px_um):
-    """Glob-based fine path lookup (returns whatever is found first)."""
-    m = find_first(f"*{sample}*{px_um}um*.hdf5")
+    """Anchored fine path lookup (`_<px>um_` token, like coarse_path)."""
+    m = find_level_file(sample, px_um)
     if m is not None:
         return m
     # last-resort guesses, in case the glob couldn't match
@@ -90,32 +88,31 @@ def fine_path_with_fallback(sample, px_um):
 
 
 def mask_from_roi_detection(coarse_comp, coarse_data, k, fine_px_mm,
-                             dwell_ms, n_fine=5):
+                             dwell_ms, setup_ms, n_fine=5):
     """Build a coarse-grid mask from ROI detection (threshold + boxes + margin)."""
     bin_mask, _, _ = threshold_map(coarse_comp, method="auto", k=k)
     labeled, _ = label_rois(bin_mask, min_pixels=1)
     boxes = get_bounding_boxes(labeled, coarse_data["xdata"], coarse_data["ydata"])
     if len(boxes) == 0:
         return np.zeros_like(coarse_comp, dtype=bool)
-    boxes = group_rois(boxes, dwell_ms=dwell_ms, dx=fine_px_mm, dy=fine_px_mm)
+    boxes = group_rois(boxes, dwell_ms=dwell_ms, dx=fine_px_mm, dy=fine_px_mm,
+                       setup_ms=setup_ms,
+                       size_px_mm=(coarse_data["dx"], coarse_data["dy"]))
     boxes_m = add_margin(boxes, coarse_px_mm=coarse_data["dx"],
                          fine_px_mm=fine_px_mm, n_fine=n_fine)
 
-    # Project boxes back into a coarse-grid binary mask
+    # Project boxes back into a coarse-grid binary mask: a pixel belongs to a
+    # box iff its CENTER lies inside (same rule as script 03's ground-truth
+    # test), independent of the axes' storage order (ascending or descending).
     mask = np.zeros_like(coarse_comp, dtype=bool)
     xc, yc = coarse_data["xdata"], coarse_data["ydata"]
     for b in boxes_m:
         x0, x1, y0, y1 = b["mm"]
         xmin, xmax = min(x0, x1), max(x0, x1)
         ymin, ymax = min(y0, y1), max(y0, y1)
-        j0 = np.searchsorted(np.sort(xc), xmin)
-        j1 = np.searchsorted(np.sort(xc), xmax)
-        i0 = np.searchsorted(np.sort(yc), ymin)
-        i1 = np.searchsorted(np.sort(yc), ymax)
-        # use range of indices (assume monotonic)
-        ix_lo, ix_hi = min(j0, j1), max(j0, j1)
-        iy_lo, iy_hi = min(i0, i1), max(i0, i1)
-        mask[iy_lo:iy_hi+1, ix_lo:ix_hi+1] = True
+        cols = (xc >= xmin) & (xc <= xmax)
+        rows = (yc >= ymin) & (yc <= ymax)
+        mask[np.ix_(rows, cols)] = True
     return mask
 
 
@@ -158,7 +155,7 @@ def sweep_sample(sample, dwell_ms, fine_px_mm, setup_ms, fine_um=25):
     for k in ROI_K_VALUES:
         mask_c = mask_from_roi_detection(coarse_comp, coarse,
                                          k=k, fine_px_mm=fine_px_mm,
-                                         dwell_ms=dwell_ms)
+                                         dwell_ms=dwell_ms, setup_ms=setup_ms)
         mask_f = project_mask(mask_c, coarse["xdata"], coarse["ydata"],
                               fine["xdata"], fine["ydata"])
         m = _measure(mask_f, f"ROI k={k:>4}")
@@ -196,7 +193,7 @@ def save_csv(rows, outpath):
     print(f"\nCSV saved -> {outpath}")
 
 
-def plot_pareto(rows, outpath):
+def plot_pareto(rows, outpath, show=True):
     if not rows:
         return
     samples = sorted({r["sample"] for r in rows})
@@ -229,9 +226,7 @@ def plot_pareto(rows, outpath):
     ax.legend(fontsize=8, loc="best")
 
     plt.tight_layout()
-    plt.savefig(outpath, dpi=150, bbox_inches="tight")
-    print(f"Figure saved -> {outpath}")
-    plt.show()
+    save_and_show(fig, outpath, show=show)
 
 
 def main():
@@ -246,7 +241,8 @@ def main():
     # Combined output (also useful for single sample)
     tag = "_".join(args.samples)
     save_csv(all_results, OUTPUT_DIR / f"pareto_{tag}.csv")
-    plot_pareto(all_results, OUTPUT_DIR / f"pareto_{tag}.png")
+    plot_pareto(all_results, OUTPUT_DIR / f"pareto_{tag}.png",
+                show=not args.no_show)
 
 
 if __name__ == "__main__":
