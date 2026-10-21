@@ -31,9 +31,7 @@ import numpy as np
 
 sys.path.insert(0, str(Path(__file__).parent))
 from utils.hdf5_reader import load_xrf, get_composite_map
-from utils.roi_utils import (sample_mask, threshold_map, label_rois,
-                              get_bounding_boxes)
-from utils.validation_utils import project_mask
+from utils.roi_utils import threshold_map, label_rois, get_bounding_boxes
 from utils.cascade import find_level_file, refine_cascade, dwell_ms_from_path
 from utils.plotting import save_and_show
 
@@ -181,18 +179,9 @@ def main():
         ax.imshow(comp, extent=extent, origin="upper", aspect="equal",
                   cmap="inferno", vmin=0, vmax=vmax)
 
-        # contour of the mask at this level
-        if i == 0:
-            m_show = sample_mask(comp, kernel_px=args.kernel)[0]
-        else:
-            # reconstitute the mask projected onto this level for display
-            prev_d = scans[levels[i - 1]]["data"]
-            # rebuild from per_level_stats - we lost intermediate masks;
-            # for display, just use intersection of comp>thresh with prev projected
-            # (the mask variable now holds the FINEST level mask)
-            # Simpler: project final mask back onto this level
-            m_show = project_mask(mask, fine["xdata"], fine["ydata"],
-                                  d["xdata"], d["ydata"])
+        # contour of the ACTUAL mask used at this level (kept by refine_cascade),
+        # not a recomputed/reprojected approximation.
+        m_show = s["mask"]
 
         ax.contour(m_show.astype(float), levels=[0.5], colors="cyan",
                    linewidths=0.8, extent=extent, origin="upper")

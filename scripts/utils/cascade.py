@@ -151,6 +151,7 @@ def refine_cascade(scans, kernel_px=2, mode="otsu_lower", level=50.0,
 
         st["px"] = px
         st["shape"] = data["mapdata"].shape if "mapdata" in data else comp.shape
+        st["mask"] = m          # this level's ACTUAL mask (for faithful plotting)
         stats_all.append(st)
 
         if verbose:

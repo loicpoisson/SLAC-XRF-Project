@@ -381,9 +381,9 @@ footprint at that level; each level only scans inside the previous mask, so the
 mask should tighten as resolution improves. The last panel is the final ROIs.
 
 ![Cascade UA1_P1](UA1_P1_hierarchical_250_100_50_25.png)
-*UA1_P1: footprint barely shrinks (90 % to 76 % over the four levels) and captures
-79 % of the signal, but the cascade ends up ~as slow as a direct fine raster on
-this dense sample. Refinement only helps when the mask actually tightens.*
+*UA1_P1: footprint barely shrinks (90.5 % to 80.6 % over the four levels) and
+captures 79 % of the signal, but the cascade ends up ~as slow as a direct fine
+raster on this dense sample. Refinement only helps when the mask actually tightens.*
 
 ![Cascade UB1_P1](UB1_P1_hierarchical_250_100_50_25.png)
 *UB1_P1: same behaviour, dense footprint, little spatial gain.*
