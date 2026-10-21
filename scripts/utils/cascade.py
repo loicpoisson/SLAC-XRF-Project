@@ -80,20 +80,31 @@ def refine_step(comp, data, prev_mask=None, prev_data=None,
     (mask, thresh, stats)
         mask   : bool 2D array on this level's grid
         thresh : threshold used by sample_mask
-        stats  : dict {n_in, n_tot, area_frac, signal_in_frac, threshold}
+        stats  : dict {n_in, n_scanned, n_tot, area_frac, signal_in_frac,
+                       threshold}
+
+    Note on the two pixel counts: `n_in` is the size of the REFINED mask
+    (what survives re-detection at this level), while `n_scanned` is the
+    number of pixels actually ACQUIRED at this level — the full frame at the
+    first level (you must scan everything to detect anything), the projection
+    of the previous level's mask afterwards. Time accounting must use
+    `n_scanned`; using n_in undercounts the cascade cost.
     """
     if prev_mask is None:
         mask, thresh = sample_mask(comp, kernel_px=kernel_px, mode=mode, level=level)
+        n_scanned = int(mask.size)
     else:
         mask_here = project_mask(prev_mask, prev_data["xdata"], prev_data["ydata"],
                                  data["xdata"], data["ydata"])
         mask, thresh = sample_mask(comp, kernel_px=kernel_px, mode=mode,
                                    level=level, restrict_to=mask_here)
+        n_scanned = int(mask_here.sum())
 
     n_in, n_tot = int(mask.sum()), int(mask.size)
     total = float(comp.sum())
     stats = {
         "n_in":           n_in,
+        "n_scanned":      n_scanned,
         "n_tot":          n_tot,
         "area_frac":      n_in / n_tot if n_tot else 0.0,
         "signal_in_frac": float(comp[mask].sum()) / total if total > 0 else 0.0,
@@ -118,8 +129,8 @@ def refine_cascade(scans, kernel_px=2, mode="otsu_lower", level=50.0,
     Returns
     -------
     (final_mask, per_level_stats)
-        per_level_stats : list of dicts with keys {px, shape, n_in, n_tot,
-                          area_frac, signal_in_frac, threshold}
+        per_level_stats : list of dicts with keys {px, shape, n_in, n_scanned,
+                          n_tot, area_frac, signal_in_frac, threshold}
     """
     mask = None
     prev_data = None
@@ -139,6 +150,7 @@ def refine_cascade(scans, kernel_px=2, mode="otsu_lower", level=50.0,
             n_in, n_tot = int(m.sum()), int(m.size)
             st = {
                 "n_in":           n_in,
+                "n_scanned":      n_in,   # the projected mask IS what's scanned
                 "n_tot":          n_tot,
                 "area_frac":      n_in / n_tot if n_tot else 0.0,
                 "signal_in_frac": float(comp[m].sum()) / total if total > 0 else 0.0,

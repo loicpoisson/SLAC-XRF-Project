@@ -77,7 +77,7 @@ def _fisher_score(x, t):
 
 # ── public interface ──────────────────────────────────────────────────────────
 
-def threshold_map(channel_map, method="auto", k=2.0):
+def threshold_map(channel_map, method="auto", k=2.0, mask=None):
     """
     Compute a binary mask of high-intensity (ROI) pixels.
 
@@ -93,6 +93,13 @@ def threshold_map(channel_map, method="auto", k=2.0):
         'sigma'   — mean + k * std  (non-robust, kept for comparison)
     k : float
         sensitivity multiplier (default 2.0, lower = more ROI pixels)
+    mask : bool 2D array, optional
+        If given, the threshold statistics are computed over channel_map[mask]
+        only. Essential when the map was zero-filled outside a scan footprint:
+        including the injected zeros collapses the robust statistics (median/
+        MAD/IQR -> 0) and the threshold separates footprint-from-void instead
+        of particle-from-matrix. The returned mask still covers the full map;
+        intersect it with the footprint if needed.
 
     Returns
     -------
@@ -100,7 +107,10 @@ def threshold_map(channel_map, method="auto", k=2.0):
     thresh      : float          threshold value used
     method_used : str            which method was selected
     """
-    x = channel_map.ravel().astype(float)
+    if mask is not None:
+        x = channel_map[mask].ravel().astype(float)
+    else:
+        x = channel_map.ravel().astype(float)
 
     candidates = {
         "mad":     _thresh_mad(x, k),
@@ -129,8 +139,8 @@ def threshold_map(channel_map, method="auto", k=2.0):
             "Use 'auto', 'mad', 'trimmed', 'iqr', or 'sigma'."
         )
 
-    mask = channel_map > thresh
-    return mask, thresh, method_used
+    roi_mask = channel_map > thresh
+    return roi_mask, thresh, method_used
 
 
 def _sample_threshold(values, mode="otsu_lower", level=50.0):
@@ -231,6 +241,9 @@ def sample_mask(composite, kernel_px=2, mode="otsu_lower", level=50.0,
 def remove_border_pixels(mask, border=1):
     """Zero out pixels on the edge of the array (frequent scan artifacts)."""
     clean = mask.copy()
+    if border <= 0:
+        # clean[-0:] would select the WHOLE array and blank everything.
+        return clean
     clean[:border, :]  = False
     clean[-border:, :] = False
     clean[:, :border]  = False
@@ -292,11 +305,12 @@ def get_bounding_boxes(labeled, xdata, ydata):
         return []
 
     slices = ndimage.find_objects(labeled)            # list of (slice_r, slice_c)
-    sizes  = ndimage.sum(np.ones_like(labeled, dtype=np.int32),
-                         labels=labeled, index=np.arange(1, n_rois + 1))
-    coms   = ndimage.center_of_mass(np.ones_like(labeled, dtype=np.float32),
-                                     labels=labeled,
-                                     index=np.arange(1, n_rois + 1))
+    sizes  = np.bincount(labeled.ravel(), minlength=n_rois + 1)[1:]
+    coms   = np.asarray(ndimage.center_of_mass(
+        np.ones_like(labeled, dtype=np.float32),
+        labels=labeled, index=np.arange(1, n_rois + 1))).reshape(-1, 2)
+    cx_all = np.interp(coms[:, 1], np.arange(len(xdata)), xdata)
+    cy_all = np.interp(coms[:, 0], np.arange(len(ydata)), ydata)
 
     boxes = []
     for roi_id, sl in enumerate(slices, 1):
@@ -305,15 +319,13 @@ def get_bounding_boxes(labeled, xdata, ydata):
         sr, sc = sl
         r0, r1 = sr.start, sr.stop - 1
         c0, c1 = sc.start, sc.stop - 1
-        com_r, com_c = coms[roi_id - 1]
         boxes.append({
             "id":        roi_id,
             "pixels":    (r0, r1, c0, c1),
             "mm":        (float(xdata[c0]), float(xdata[c1]),
                           float(ydata[r0]), float(ydata[r1])),
             "size":      int(sizes[roi_id - 1]),
-            "center_mm": (float(np.interp(com_c, np.arange(len(xdata)), xdata)),
-                          float(np.interp(com_r, np.arange(len(ydata)), ydata))),
+            "center_mm": (float(cx_all[roi_id - 1]), float(cy_all[roi_id - 1])),
         })
     return boxes
 
@@ -321,8 +333,17 @@ def get_bounding_boxes(labeled, xdata, ydata):
 # ── scanner cost model (from Paper 1 & Paper 2) ───────────────────────────────
 # Paper 1: v_max=200 mm/s, a_max=500 mm/s²
 # Paper 2: Newport XPS motors, line-by-line trajectories
+#
+# Single source for the kinematics constants: every cost computation (here and
+# in validation_utils / the scripts) defaults to these. Change them HERE when
+# moving to different motors.
 
-def travel_time(distance_mm, v_max=200.0, a_max=500.0):
+V_MAX_MM_S  = 200.0   # scanner max velocity [mm/s]      (Paper 1)
+A_MAX_MM_S2 = 500.0   # scanner max acceleration [mm/s²] (Paper 1)
+SETUP_MS    = 500.0   # per-region overhead (positioning, triggering) [ms]
+
+
+def travel_time(distance_mm, v_max=V_MAX_MM_S, a_max=A_MAX_MM_S2):
     """
     Minimum time [s] for the scanner to travel distance_mm [mm].
     Uses trapezoidal velocity profile (Paper 1 kinematics).
@@ -339,92 +360,37 @@ def travel_time(distance_mm, v_max=200.0, a_max=500.0):
     return v_max / a_max + distance_mm / v_max
 
 
-def _edge_distance(box_a, box_b):
-    """
-    Minimum edge-to-edge distance [mm] between two bounding boxes.
-    Returns 0 if they overlap or touch.
-    """
-    ax0, ax1, ay0, ay1 = box_a["mm"]
-    bx0, bx1, by0, by1 = box_b["mm"]
-    ax0, ax1 = min(ax0, ax1), max(ax0, ax1)
-    ay0, ay1 = min(ay0, ay1), max(ay0, ay1)
-    bx0, bx1 = min(bx0, bx1), max(bx0, bx1)
-    by0, by1 = min(by0, by1), max(by0, by1)
-    dx = max(0.0, max(ax0, bx0) - min(ax1, bx1))
-    dy = max(0.0, max(ay0, by0) - min(ay1, by1))
-    return np.sqrt(dx ** 2 + dy ** 2)
-
-
-def merge_cost(box_a, box_b, dwell_ms, dx, dy,
-               v_max=200.0, a_max=500.0, setup_ms=500.0):
-    """
-    Compute the time saved (or lost) by merging two ROIs.
-
-    Decision rule (derived from T_sep vs T_merge):
-        Merge if:  n_gap * dwell  <  T_travel(d) + T_setup
-
-    Parameters
-    ----------
-    box_a, box_b : ROI dicts from get_bounding_boxes()
-    dwell_ms     : dwell time per pixel at fine resolution [ms]
-    dx, dy       : fine pixel size [mm]
-    v_max        : scanner max velocity [mm/s]  (Paper 1 default)
-    a_max        : scanner max acceleration [mm/s²]  (Paper 1 default)
-    setup_ms     : per-region overhead (positioning, triggering) [ms]
-
-    Returns
-    -------
-    saving_ms    : float  time saved by merging (positive = merge is better)
-    should_merge : bool
-    info         : dict  with breakdown for transparency
-    """
-    ax0, ax1, ay0, ay1 = box_a["mm"]
-    bx0, bx1, by0, by1 = box_b["mm"]
-
-    # bounding box of the merged region
-    mx0 = min(ax0, ax1, bx0, bx1)
-    mx1 = max(ax0, ax1, bx0, bx1)
-    my0 = min(ay0, ay1, by0, by1)
-    my1 = max(ay0, ay1, by0, by1)
-
-    # gap pixels = pixels in merged box not in either original ROI
-    merged_nx = max(1, round(abs(mx1 - mx0) / dx) + 1)
-    merged_ny = max(1, round(abs(my1 - my0) / dy) + 1)
-    n_merged   = merged_nx * merged_ny
-    n_gap      = max(0, n_merged - box_a["size"] - box_b["size"])
-
-    # costs
-    d          = _edge_distance(box_a, box_b)
-    t_travel_s = travel_time(d, v_max, a_max)
-    t_travel   = t_travel_s * 1000.0          # ms
-
-    cost_gap   = n_gap  * dwell_ms            # ms: wasted pixels if merged
-    cost_sep   = t_travel + setup_ms          # ms: travel + setup if separate
-
-    saving_ms  = cost_sep - cost_gap          # positive → merge is better
-    should_merge = saving_ms > 0
-
-    info = {
-        "distance_mm":   round(d, 3),
-        "travel_ms":     round(t_travel, 1),
-        "setup_ms":      setup_ms,
-        "n_gap_pixels":  n_gap,
-        "cost_gap_ms":   round(cost_gap, 1),
-        "cost_sep_ms":   round(cost_sep, 1),
-        "saving_ms":     round(saving_ms, 1),
-    }
-    return saving_ms, should_merge, info
-
-
 def group_rois(boxes, dwell_ms, dx, dy,
-               v_max=200.0, a_max=500.0, setup_ms=500.0):
+               v_max=V_MAX_MM_S, a_max=A_MAX_MM_S2, setup_ms=SETUP_MS,
+               size_px_mm=None):
     """
     Greedily merge ROI pairs where merging saves time.
     Iterates until no more beneficial merges exist.
 
+    Decision rule (T_sep vs T_merge): merge two boxes when the time wasted
+    scanning the gap pixels of the merged bbox at fine resolution is smaller
+    than the travel + setup cost of visiting them separately:
+
+        merge if:  n_gap * dwell  <  T_travel(d) + T_setup
+
     Vectorized: each iteration computes all pairwise saving matrices via numpy
     broadcasting (O(N^2) numpy ops vs O(N^2) Python ops). For N~500 ROIs this
     is ~100x faster than the pure-Python version.
+
+    Parameters
+    ----------
+    boxes      : ROI dicts from get_bounding_boxes()
+    dwell_ms   : dwell time per pixel at FINE resolution [ms]
+    dx, dy     : fine pixel size [mm] (the resolution the merged bbox will be
+                 scanned at)
+    size_px_mm : (dx_src, dy_src) pixel size [mm] that box['size'] is counted
+                 in. get_bounding_boxes counts sizes on the CURRENT (coarse)
+                 grid, so pass the coarse pixel size here; sizes are then
+                 converted to fine-pixel units so the gap count
+                 n_gap = n_merged_fine - sizes is unit-consistent. If None,
+                 sizes are assumed to already be in (dx, dy) units — with
+                 coarse-grid sizes that overestimates n_gap by
+                 ~(coarse_px/fine_px)^2 and suppresses all merging.
 
     Returns a new list of (possibly merged) ROI boxes (one dict per group).
     """
@@ -437,6 +403,9 @@ def group_rois(boxes, dwell_ms, dx, dy,
     y0 = np.array([min(b["mm"][2], b["mm"][3]) for b in boxes], dtype=float)
     y1 = np.array([max(b["mm"][2], b["mm"][3]) for b in boxes], dtype=float)
     size = np.array([b["size"] for b in boxes], dtype=int)
+    if size_px_mm is not None:
+        factor = (size_px_mm[0] / dx) * (size_px_mm[1] / dy)
+        size = np.maximum(1, np.round(size * factor)).astype(int)
     n_orig = np.ones(len(boxes), dtype=int)   # original ROI count per group
 
     d_crit = v_max ** 2 / a_max
@@ -511,25 +480,6 @@ def group_rois(boxes, dwell_ms, dx, dy,
     return merged_boxes
 
 
-def _group_bbox(group, dx, dy):
-    """Compute the merged bounding box for a list of ROI dicts."""
-    all_mm = [b["mm"] for b in group]
-    x0 = min(min(m[0], m[1]) for m in all_mm)
-    x1 = max(max(m[0], m[1]) for m in all_mm)
-    y0 = min(min(m[2], m[3]) for m in all_mm)
-    y1 = max(max(m[2], m[3]) for m in all_mm)
-    cx = (x0 + x1) / 2
-    cy = (y0 + y1) / 2
-    size = sum(b["size"] for b in group)
-    return {
-        "id":        0,
-        "mm":        (x0, x1, y0, y1),
-        "size":      size,
-        "center_mm": (cx, cy),
-        "pixels":    None,
-    }
-
-
 def add_margin(boxes, coarse_px_mm, fine_px_mm, n_fine=5):
     """
     Expand each ROI bounding box by a safety margin on all four sides.
@@ -589,8 +539,15 @@ def nearest_neighbor_tour(centers, start_idx=0):
 
 def two_opt_improve(centers, tour):
     """
-    2-opt: try reversing every sub-segment [i+1..j], keep if shorter.
-    Runs until no improving swap exists.
+    2-opt for an OPEN path: try reversing every sub-segment [i+1..j], keep if
+    the path gets shorter. Runs until no improving swap exists.
+
+    The scan path is open (the scanner does not return to the start), so the
+    cost model must NOT include a closing edge tour[-1] -> tour[0]: optimizing
+    the closed cycle can accept swaps that shorten the phantom closing edge
+    while lengthening the path actually traveled. We model this by treating
+    the successor of the last node as a virtual depot at zero distance from
+    everything (d = 0), which makes cycle length == open-path length.
 
     Vectorized: each iteration builds an (N, N) matrix of swap savings using
     numpy broadcasting, then applies the single best improving swap. ~50-100x
@@ -599,7 +556,7 @@ def two_opt_improve(centers, tour):
     centers = np.asarray(centers, dtype=float)
     best    = list(tour)
     n       = len(best)
-    if n < 4:
+    if n < 3:
         return best
 
     while True:
@@ -615,6 +572,11 @@ def two_opt_improve(centers, tour):
         d_bd = np.linalg.norm(diff_bb, axis=2)   # (n, n) — distance(b_i, b_j)
         # old length contributed by edges i and j
         d_ab = np.linalg.norm(a - b, axis=1)     # (n,)
+        # open path: the "edge" after the last node goes to the virtual depot
+        # (zero length), so reversing a tail segment is charged correctly.
+        d_ab[-1] = 0.0
+        d_bd[:, -1] = 0.0
+        d_bd[-1, :] = 0.0
         old = d_ab[:, None] + d_ab[None, :]      # (n, n)
         new = d_ac + d_bd
         delta = new - old                        # negative = improvement
@@ -635,13 +597,18 @@ def two_opt_improve(centers, tour):
 
 def or_opt_improve(centers, tour, block_sizes=(1, 2, 3)):
     """
-    Or-opt improvement: for each block of k consecutive nodes, try every
-    possible reinsertion position in the tour (forward and reversed).
-    Keep moves that reduce total Euclidean path length.
+    Or-opt improvement for an OPEN path: for each block of k consecutive nodes,
+    try every possible reinsertion position (forward and reversed) and keep
+    moves that reduce total Euclidean path length.
     Runs passes over all block sizes until no improvement is found.
 
     Complement to 2-opt: finds improvements that do not require segment
     reversal (e.g. relocating a node to a better spot without uncrossing).
+
+    Open-path semantics: no wrap-around edge exists between tour[-1] and
+    tour[0], and position 0 is never moved — callers (script 02) anchor the
+    start on the ROI nearest the scanner's starting position, and the cost of
+    the first hop is charged from that fixed start.
 
     Parameters
     ----------
@@ -653,64 +620,57 @@ def or_opt_improve(centers, tour, block_sizes=(1, 2, 3)):
     -------
     improved tour as a list of indices
     """
+    centers = np.asarray(centers, dtype=float)
+    dmat = np.linalg.norm(centers[:, None, :] - centers[None, :, :], axis=2)
+
     def dist(a, b):
-        return np.linalg.norm(centers[a] - centers[b])
+        return dmat[a, b]
 
     best = list(tour)
     n    = len(best)
+    if n < 3:
+        return best
 
     for k in block_sizes:
+        if n - k < 2:                 # need at least the anchor + one other node
+            continue
         improved = True
         while improved:
             improved = False
-            for i in range(n):
-                # block: nodes at positions i, i+1, ..., i+k-1  (wrap-around)
-                block = [best[(i + s) % n] for s in range(k)]
-                prev_i = best[(i - 1) % n]
-                next_i = best[(i + k) % n]
+            # position 0 is the anchored start: blocks begin at i >= 1
+            for i in range(1, n - k + 1):
+                block  = best[i:i + k]
+                prev_i = best[i - 1]
+                next_i = best[i + k] if i + k < n else None
 
-                # gain from removing the block
-                remove_gain = (dist(prev_i, block[0])
-                               + dist(block[-1], next_i)
-                               - dist(prev_i, next_i))
+                # gain from removing the block (block at the tail: no next edge)
+                if next_i is None:
+                    remove_gain = dist(prev_i, block[0])
+                else:
+                    remove_gain = (dist(prev_i, block[0])
+                                   + dist(block[-1], next_i)
+                                   - dist(prev_i, next_i))
 
-                # try inserting block (forward and reversed) at every gap j→j+1
-                for j in range(n):
-                    # skip positions that overlap with the block itself
-                    block_positions = {(i + s) % n for s in range(-1, k + 1)}
-                    if j % n in block_positions:
-                        continue
+                rest = best[:i] + best[i + k:]
+                m = len(rest)
+                # insert after rest[j] (j = m-1 appends at the open end)
+                for j in range(m):
+                    if rest[j] == prev_i:
+                        continue      # reinserting at the original spot: no-op
+                    node_j  = rest[j]
+                    node_j1 = rest[j + 1] if j + 1 < m else None
 
-                    node_j  = best[j % n]
-                    node_j1 = best[(j + 1) % n]
-                    break_edge = dist(node_j, node_j1)
-
-                    for fwd in (True, False):
-                        seg = block if fwd else block[::-1]
-                        insert_cost = (dist(node_j, seg[0])
-                                       + dist(seg[-1], node_j1)
-                                       - break_edge)
-                        saving = remove_gain - insert_cost
-                        if saving > 1e-10:
-                            # apply move: remove block, insert at j
-                            new_tour = []
-                            pos = 0
-                            while pos < n:
-                                idx = pos % n
-                                real_idx = best[idx]
-                                in_block = any(
-                                    best[(i + s) % n] == real_idx
-                                    for s in range(k)
-                                )
-                                if not in_block:
-                                    new_tour.append(real_idx)
-                                    if real_idx == node_j:
-                                        new_tour.extend(seg)
-                                pos += 1
-                            if len(new_tour) == n:
-                                best     = new_tour
-                                improved = True
-                                break
+                    for seg in (block, block[::-1]):
+                        if node_j1 is None:
+                            insert_cost = dist(node_j, seg[0])
+                        else:
+                            insert_cost = (dist(node_j, seg[0])
+                                           + dist(seg[-1], node_j1)
+                                           - dist(node_j, node_j1))
+                        if remove_gain - insert_cost > 1e-10:
+                            best     = rest[:j + 1] + seg + rest[j + 1:]
+                            improved = True
+                            break
                     if improved:
                         break
                 if improved:

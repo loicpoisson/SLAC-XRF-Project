@@ -42,11 +42,12 @@ def parse_args():
                    choices=["auto", "mad", "trimmed", "iqr", "sigma"],
                    help="Threshold method (default: auto — selects best via Fisher score)")
     p.add_argument("--k",        default=1.0, type=float,
-                   help="Sigma multiplier for 'sigma' method (default: 2.0)")
+                   help="Threshold sensitivity multiplier (default: 1.0)")
     p.add_argument("--min-px",   default=1, type=int,
-                   help="Minimum ROI size in pixels (default: 2)")
-    p.add_argument("--dwell",    default=25.0, type=float,
-                   help="Fine scan dwell time per pixel [ms] (default: 25)")
+                   help="Minimum ROI size in pixels (default: 1)")
+    p.add_argument("--dwell",    default=10.0, type=float,
+                   help="Fine scan dwell time per pixel [ms] (default: 10, "
+                        "same baseline as scripts 03/04/06/07/08/10)")
     p.add_argument("--fine-px",  default=0.025, type=float,
                    help="Fine scan pixel size [mm] (default: 0.025 = 25 um)")
     p.add_argument("--setup-ms", default=500.0, type=float,
@@ -170,10 +171,11 @@ def main():
     # ── group nearby ROIs using scanner cost model ────────────────────────────
     boxes = group_rois(
         boxes,
-        dwell_ms  = args.dwell,
-        dx        = args.fine_px,
-        dy        = args.fine_px,
-        setup_ms  = args.setup_ms,
+        dwell_ms   = args.dwell,
+        dx         = args.fine_px,
+        dy         = args.fine_px,
+        setup_ms   = args.setup_ms,
+        size_px_mm = (data["dx"], data["dy"]),   # sizes are coarse-grid pixels
     )
     n_after = len(boxes)
     n_merges = sum(b.get("n_original_rois", 1) - 1 for b in boxes)

@@ -31,24 +31,25 @@ sys.path.insert(0, str(Path(__file__).parent))
 from utils.hdf5_reader import load_xrf, get_composite_map, list_element_channels
 from utils.roi_utils import (threshold_map, label_rois, get_bounding_boxes,
                               group_rois, add_margin)
-from utils.paths import find_coarse, find_fine, require, PROJECT_ROOT
+from utils.validation_utils import (compute_validation_metrics,
+                                     estimate_travel_overhead)
+from utils.cli import add_io_args
+from utils.plotting import save_and_show
+from utils.paths import require, PROJECT_ROOT
 
 OUTPUT_DIR = PROJECT_ROOT / "outputs"
 
 
 def parse_args():
     p = argparse.ArgumentParser(description="Validate coarse ROIs against fine ground-truth scan")
-    dc, df = find_coarse(), find_fine()
-    p.add_argument("--coarse", default=str(dc) if dc else None,
-                   help="Coarse scan HDF5 (auto-detected from data/ if omitted)")
-    p.add_argument("--fine",   default=str(df) if df else None,
-                   help="Fine scan HDF5 ground truth (auto-detected if omitted)")
-    p.add_argument("--channels", default=None, help="Comma-separated element channels")
+    add_io_args(p)
     p.add_argument("--method",   default="auto",
                    choices=["auto", "mad", "trimmed", "iqr", "sigma"])
     p.add_argument("--k",        default=1.0,  type=float)
     p.add_argument("--min-px",   default=1,    type=int)
-    p.add_argument("--dwell",    default=25.0, type=float)
+    p.add_argument("--dwell",    default=10.0, type=float,
+                   help="Fine scan dwell per pixel [ms] (default 10, same "
+                        "baseline as scripts 04/06/07/08/10)")
     p.add_argument("--fine-px",  default=0.025, type=float)
     p.add_argument("--setup-ms", default=500.0, type=float)
     p.add_argument("--n-fine",   default=5,    type=int,
@@ -99,7 +100,8 @@ def main():
     labeled, _ = label_rois(mask_thr, min_pixels=args.min_px)
     boxes = get_bounding_boxes(labeled, coarse["xdata"], coarse["ydata"])
     boxes = group_rois(boxes, dwell_ms=args.dwell, dx=args.fine_px,
-                       dy=args.fine_px, setup_ms=args.setup_ms)
+                       dy=args.fine_px, setup_ms=args.setup_ms,
+                       size_px_mm=(coarse["dx"], coarse["dy"]))
     boxes_margin = add_margin(boxes, coarse_px_mm=coarse["dx"],
                               fine_px_mm=args.fine_px, n_fine=args.n_fine)
     print(f"  ROIs detected: {len(boxes_margin)}")
@@ -116,46 +118,42 @@ def main():
 
     # ── 3. Build ROI mask on fine grid ───────────────────────────────────
     roi_mask = build_roi_mask(fine, boxes_margin)
-    n_pix_total = roi_mask.size
-    n_pix_in    = int(roi_mask.sum())
-    area_frac   = n_pix_in / n_pix_total
 
-    # ── 4. Validation metrics ────────────────────────────────────────────
-    signal_total    = float(fine_comp.sum())
-    signal_in_rois  = float(fine_comp[roi_mask].sum())
-    signal_captured = signal_in_rois / signal_total if signal_total > 0 else 0.0
+    # ── 4. Validation metrics (shared implementation: same definitions and
+    #      travel model as scripts 04/06/07/08/10, so speedups are comparable)
+    tov = estimate_travel_overhead(roi_mask, fine["xdata"], fine["ydata"],
+                                   setup_ms=args.setup_ms)
+    m = compute_validation_metrics(roi_mask, fine_comp, fine_dwell_ms=args.dwell,
+                                   travel_overhead_ms=tov["overhead_ms"])
+    area_frac       = m["area_frac"]
+    signal_captured = m["signal_captured"]
     signal_missed   = 1.0 - signal_captured
+    speedup         = m["speedup"]
 
-    # Per-pixel: where is the missed signal concentrated?
+    # Per-pixel: where is the missed signal concentrated? (03-specific diagnostic)
     missed_map = fine_comp.copy()
     missed_map[roi_mask] = 0
     top_missed = float(missed_map.max())
     median_missed = float(np.median(missed_map[missed_map > 0])) if (missed_map > 0).any() else 0.0
-    median_in_roi = float(np.median(fine_comp[roi_mask])) if n_pix_in > 0 else 0.0
-
-    # Time speedup (assuming same dwell on fine pixels)
-    # raster fine = n_pix_total * dwell
-    # adaptive    = n_pix_in    * dwell  + setup_overhead * n_ROI
-    raster_ms   = n_pix_total * args.dwell
-    adaptive_ms = n_pix_in * args.dwell + len(boxes_margin) * args.setup_ms
-    speedup     = raster_ms / adaptive_ms
+    median_in_roi = float(np.median(fine_comp[roi_mask])) if m["n_in"] > 0 else 0.0
 
     print(f"\n=== VALIDATION METRICS ===")
-    print(f"  Fine scan pixels       : {n_pix_total:,}")
-    print(f"  Pixels inside ROIs     : {n_pix_in:,}  ({area_frac*100:.1f}%)")
+    print(f"  Fine scan pixels       : {m['n_tot']:,}")
+    print(f"  Pixels inside ROIs     : {m['n_in']:,}  ({area_frac*100:.1f}%)")
     print(f"")
-    print(f"  Total XRF signal       : {signal_total:.3e}")
-    print(f"  Signal captured by ROIs: {signal_in_rois:.3e}  ({signal_captured*100:.1f}%)")
-    print(f"  Signal MISSED          : {signal_total - signal_in_rois:.3e}  ({signal_missed*100:.1f}%)")
+    print(f"  Total XRF signal       : {m['signal_total']:.3e}")
+    print(f"  Signal captured by ROIs: {m['signal_in']:.3e}  ({signal_captured*100:.1f}%)")
+    print(f"  Signal MISSED          : {m['signal_total'] - m['signal_in']:.3e}  ({signal_missed*100:.1f}%)")
     print(f"")
     print(f"  Median intensity in ROI : {median_in_roi:.1f}")
     print(f"  Median missed intensity : {median_missed:.1f}   (low = nothing important missed)")
     print(f"  Max missed intensity    : {top_missed:.1f}     (high = at least one real particle missed)")
     print(f"")
-    print(f"  Raster fine time   : {raster_ms/1000:.0f} s  ({raster_ms/60000:.1f} min)")
-    print(f"  Adaptive time      : {adaptive_ms/1000:.0f} s  ({adaptive_ms/60000:.1f} min)")
-    print(f"  REAL SPEEDUP       : {speedup:.1f}x")
-    print(f"  Signal efficiency  : {signal_captured/area_frac:.1f}x  (ratio signal_captured / area_scanned)")
+    print(f"  Raster fine time   : {m['raster_ms']/1000:.0f} s  ({m['raster_ms']/60000:.1f} min)")
+    print(f"  Adaptive time      : {m['adaptive_ms']/1000:.0f} s  ({m['adaptive_ms']/60000:.1f} min)")
+    print(f"    travel + setup   : {tov['overhead_ms']/1000:.1f} s  over {tov['n_regions']} regions")
+    print(f"  REAL SPEEDUP       : {speedup:.1f}x  (no-travel: {m['speedup_no_travel']:.1f}x)")
+    print(f"  Signal efficiency  : {m['efficiency']:.1f}x  (ratio signal_captured / area_scanned)")
 
     # ── 5. Figure: ground truth + ROIs + what we'd see ───────────────────
     fig, axes = plt.subplots(1, 3, figsize=(18, 6))
@@ -209,9 +207,7 @@ def main():
     plt.tight_layout()
     OUTPUT_DIR.mkdir(exist_ok=True)
     outpath = OUTPUT_DIR / f"{Path(args.fine).stem}_validation.png"
-    plt.savefig(outpath, dpi=150, bbox_inches="tight")
-    print(f"\nFigure saved -> {outpath}")
-    plt.show()
+    save_and_show(fig, outpath, show=not args.no_show)
 
 
 if __name__ == "__main__":

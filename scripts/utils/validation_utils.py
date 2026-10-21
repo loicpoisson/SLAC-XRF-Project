@@ -9,7 +9,8 @@ import numpy as np
 from scipy import ndimage
 
 from .hdf5_reader import load_xrf, get_composite_map
-from .roi_utils import travel_time, nearest_neighbor_tour, two_opt_improve
+from .roi_utils import (travel_time, nearest_neighbor_tour, two_opt_improve,
+                        V_MAX_MM_S, A_MAX_MM_S2, SETUP_MS)
 
 
 def _nearest_idx(arr, vals):
@@ -114,7 +115,7 @@ def compute_validation_metrics(mask_fine, fine_comp, fine_dwell_ms=10.0,
     }
 
 
-def estimate_travel_overhead(mask, x_grid, y_grid, setup_ms=500.0):
+def estimate_travel_overhead(mask, x_grid, y_grid, setup_ms=SETUP_MS):
     """
     Estimate the inter-region travel + setup overhead for an adaptive scan.
 
@@ -139,22 +140,29 @@ def estimate_travel_overhead(mask, x_grid, y_grid, setup_ms=500.0):
     labeled, n = ndimage.label(mask)
     if n == 0:
         return travel_overhead_from_centers(np.empty((0, 2)), setup_ms)
-    centers = np.zeros((n, 2))
-    for i in range(1, n + 1):
-        rows, cols = np.where(labeled == i)
-        centers[i - 1] = [x_grid[cols].mean(), y_grid[rows].mean()]
+    # Per-region mean coordinate in ONE labeled pass each (ndimage.mean),
+    # instead of an O(n_regions * n_pixels) `labeled == i` loop — critical on
+    # fine-grid masks (~1M px, hundreds of regions) inside the Pareto sweep.
+    idx = np.arange(1, n + 1)
+    X = np.broadcast_to(np.asarray(x_grid, dtype=float), mask.shape)
+    Y = np.broadcast_to(np.asarray(y_grid, dtype=float)[:, None], mask.shape)
+    centers = np.column_stack([ndimage.mean(X, labels=labeled, index=idx),
+                               ndimage.mean(Y, labels=labeled, index=idx)])
     return travel_overhead_from_centers(centers, setup_ms)
 
 
-def travel_overhead_from_centers(centers, setup_ms=500.0):
+def travel_overhead_from_centers(centers, setup_ms=SETUP_MS,
+                                 v_max=V_MAX_MM_S, a_max=A_MAX_MM_S2):
     """
     Inter-region travel + setup overhead given the region CENTERS [mm].
 
     The scanner visits the regions along a short tour (nearest-neighbor + 2-opt)
-    and jumps between them under the trapezoidal velocity profile, plus a fixed
-    `setup_ms` per region. This is the single source for the travel model: both
-    estimate_travel_overhead (mask-based) and the production planner (script 10,
-    plan-region-based) call it.
+    and jumps between them under the trapezoidal velocity profile (kinematics
+    default to the shared constants in utils.roi_utils; override v_max/a_max
+    for different motors), plus a fixed `setup_ms` per region. This is the
+    single source for the travel model: both estimate_travel_overhead
+    (mask-based) and the production planner (script 10, plan-region-based)
+    call it.
 
     Returns dict: n_regions, travel_ms, setup_total_ms, overhead_ms (= travel+setup).
     """
@@ -174,7 +182,7 @@ def travel_overhead_from_centers(centers, setup_ms=500.0):
     travel_ms = 0.0
     for i in range(len(tour) - 1):
         d = np.linalg.norm(centers[tour[i]] - centers[tour[i + 1]])
-        travel_ms += travel_time(d) * 1000.0
+        travel_ms += travel_time(d, v_max, a_max) * 1000.0
 
     setup_total = n * setup_ms
     return {"n_regions": n, "travel_ms": travel_ms,

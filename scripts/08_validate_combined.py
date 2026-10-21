@@ -35,8 +35,7 @@ sys.path.insert(0, str(Path(__file__).parent))
 from utils.hdf5_reader import load_xrf, get_composite_map
 from utils.roi_utils import sample_mask
 from utils.validation_utils import (project_mask, project_coarse_to_fine,
-                                     estimate_travel_overhead,
-                                     compute_validation_metrics)
+                                     estimate_travel_overhead)
 from utils.dwell import allocate_dwell
 from utils.plotting import save_and_show
 from utils.cli import add_io_args
