@@ -152,8 +152,8 @@ acquire coarse 250µm → [10 --coarse] → strategy + footprint + PLAN for 100�
 acquire 100µm in the planned regions → [10 --scan 100µm --resume] → PLAN for 50µm
 … → 25µm
 ```
-Outputs per step: report, `*_scan_plan.json` (regions + dwells), `*_scan_plan.pkl`
-(SMAK rectangles), `*_dwell_map.npy` (exact per-pixel dwell), figure, and a
+Outputs per step: report, `*_scan_plan.json` (regions + dwells), `*_scan_plan.dpm`
+(SMAK dataqueue regions), `*_dwell_map.npy` (exact per-pixel dwell), figure, and a
 `*_cascade_manifest.csv`.
 
 ### B. Offline validation (simulate) — all resolutions on disk

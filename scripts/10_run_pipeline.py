@@ -30,7 +30,7 @@ B) SIMULATE (offline validation, when every level already exists on disk)
 Degenerate: `--coarse FILE` alone, with no cascade ladder, falls back to the
 single-shot plan at --fine-px (the original script-10 behavior).
 
-Outputs (per step): a text report, a JSON scan plan, a SMAK-compatible pickle
+Outputs (per step): a text report, a JSON scan plan, a SMAK dataqueue region file (.dpm)
 (rectangles at a uniform dwell = MEAN of the desired per-pixel dwells), the
 exact per-pixel dwell map (<stem>_dwell_map.npy), and a figure.
 """
@@ -49,14 +49,19 @@ from scipy import ndimage
 
 sys.path.insert(0, str(Path(__file__).parent))
 from utils.hdf5_reader import load_xrf, get_composite_map
-from utils.strategy import describe_composite, choose_strategy
+from utils.strategy import (describe_composite, choose_strategy,
+                            choose_element_strategy, MAX_DETECT_RATIO)
 from utils.dwell import allocate_dwell
-from utils.cascade import find_level_file, available_levels, refine_step, refine_cascade
-from utils.roi_utils import label_rois, get_bounding_boxes, group_rois, add_margin
+from utils.cascade import (find_level_file, available_levels, refine_step,
+                           refine_cascade, dwell_ms_from_path)
+from utils.roi_utils import (label_rois, get_bounding_boxes, group_rois, add_margin,
+                             threshold_map)
 from utils.validation_utils import (coarse_blockmean, project_coarse_to_fine,
+                                    project_mask,
                                      travel_overhead_from_centers)
 from utils.quality import poisson_mse, poisson_mse_montecarlo, mean_snr
 from utils.plotting import save_and_show
+from utils.smak_export import write_smak_regions
 from utils.paths import (find_coarse, require, sample_hint_from_path,
                          PROJECT_ROOT, DATA_DIR)
 
@@ -87,6 +92,15 @@ def parse_args():
                    help="Resolution ladder in um, coarse first (e.g. 250 100 50 25)")
     p.add_argument("--channels", default=None,
                    help="Comma-separated element channels (default: all)")
+    p.add_argument("--target", default=None,
+                   help="Single target element (e.g. Fe.Ka): footprint = that "
+                        "element's hot spots, ladder coarse -> detect -> fine "
+                        "(see utils.strategy.choose_element_strategy)")
+    p.add_argument("--roi-k", default=1.0, type=float,
+                   help="--target: MAD multiplier of the element ROI threshold")
+    p.add_argument("--max-detect-ratio", default=MAX_DETECT_RATIO, type=float,
+                   help="--target: skip area only when the detection pixel is "
+                        "<= this many times the final pixel (default 4)")
     # Strategy
     p.add_argument("--strategy", default="auto",
                    choices=["auto", "force_roi", "force_morpho",
@@ -107,6 +121,9 @@ def parse_args():
                    help="Target fine pixel [mm] for the single-shot fallback")
     p.add_argument("--fine-dwell", default=10.0, type=float,
                    help="Reference fine dwell [ms] (raster baseline)")
+    p.add_argument("--dwell-reg", default=1.0, type=float,
+                   help="sqrt dwell regulariser: allocate on signal + reg*mean "
+                        "(robust to shot-noise-dominated estimates; 0 = plain sqrt)")
     p.add_argument("--dwell-low", default=1.0, type=float)
     p.add_argument("--dwell-high", default=50.0, type=float)
     p.add_argument("--setup-ms", default=500.0, type=float)
@@ -240,14 +257,16 @@ def make_dwell_map(comp, grid, mask, strat, args):
     if method == "temporal":
         mask_eff = np.ones_like(comp, dtype=bool)
         dwell_map, _ = allocate_dwell(comp, strat["dwell"], args.dwell_low,
-                                      args.dwell_high, mask=None)
+                                      args.dwell_high, mask=None,
+                                      reg=args.dwell_reg)
     elif method == "morpho":
         mask_eff = mask
         dwell_map = np.full_like(comp, args.fine_dwell, dtype=float)
     else:  # roi / combined : footprint + variable dwell
         mask_eff = mask
         dwell_map, _ = allocate_dwell(comp, strat["dwell"], args.dwell_low,
-                                      args.dwell_high, mask=mask_eff)
+                                      args.dwell_high, mask=mask_eff,
+                                      reg=args.dwell_reg)
     return mask_eff, dwell_map
 
 
@@ -265,22 +284,29 @@ def raster_time_ms(grid, next_px_mm, fine_dwell):
 
 
 def match_budget(dwell_map, mask_eff, grid, next_px_mm, fine_dwell,
-                 dwell_low=None, dwell_high=None):
+                 dwell_low=None, dwell_high=None, spent_ms=0.0):
     """
     Scale in-mask dwells so the in-mask pixel time equals the raster baseline
     at next_px_mm, then clip to [dwell_low, dwell_high]. Returns the scaled
     dwell_map.
+
+    spent_ms (time already used by earlier cascade levels) is deducted, so the
+    whole adaptive acquisition matches ONE raster at next_px_mm.
 
     This matches the per-pixel budget only: the emitted plan scans whole
     margined bounding boxes plus travel/setup, so its speedup can still be < 1
     (and clipping can leave part of the budget unused).
     """
     raster_total_ms = raster_time_ms(grid, next_px_mm, fine_dwell)
+    budget_ms = raster_total_ms - spent_ms
+    if budget_ms <= 0:
+        raise SystemExit(f"Earlier levels already used {spent_ms/1000:.0f}s, more "
+                         f"than the {raster_total_ms/1000:.0f}s raster budget")
 
     replicas = (grid["dx"] / next_px_mm) * (grid["dy"] / next_px_mm)
     current_total_ms = float((dwell_map * mask_eff).sum()) * replicas
     if current_total_ms > 0:
-        scale = raster_total_ms / current_total_ms
+        scale = budget_ms / current_total_ms
         dwell_map = np.where(mask_eff, dwell_map * scale, dwell_map)
         if dwell_low is not None or dwell_high is not None:
             dwell_map = np.where(mask_eff,
@@ -288,7 +314,8 @@ def match_budget(dwell_map, mask_eff, grid, next_px_mm, fine_dwell,
                                  dwell_map)
         used = float((dwell_map * mask_eff).sum()) * replicas / raster_total_ms
         print(f"  Budget matched: dwells scaled by {scale:.3f} "
-              f"(clipped total = {used*100:.0f}% of raster)")
+              f"(this level = {used*100:.0f}% of raster, earlier levels "
+              f"{spent_ms/raster_total_ms*100:.0f}%)")
     return dwell_map
 
 
@@ -312,8 +339,8 @@ def _json_safe(obj):
 
 def emit_outputs(stem, comp, grid, mask, dwell_map, plan, strat, desc,
                  next_px_mm, args, ground_truth_comp=None, per_level_stats=None,
-                 coarse_fill=None):
-    """Print the report, save JSON + SMAK pickle + figure for one step.
+                 coarse_fill=None, spent_ms=0.0):
+    """Print the report, save JSON + SMAK .dpm regions + figure for one step.
     Returns the summary dict (so callers can log a cascade manifest)."""
     # Time estimate = pixel dwell time + inter-region travel/setup overhead.
     # The overhead uses the shared travel model (trapezoidal profile + per-region
@@ -324,16 +351,22 @@ def emit_outputs(stem, comp, grid, mask, dwell_map, plan, strat, desc,
     centers = np.array([[(r["x_start_mm"] + r["x_end_mm"]) / 2.0,
                          (r["y_start_mm"] + r["y_end_mm"]) / 2.0] for r in plan])
     overhead = travel_overhead_from_centers(centers, setup_ms=args.setup_ms)
-    total_time_s = scan_time_s + overhead["overhead_ms"] / 1000.0
+    level_time_s = scan_time_s + overhead["overhead_ms"] / 1000.0
+    # Earlier cascade levels count against the speedup (they were acquired to
+    # make this plan possible); a plain raster needs none of them.
+    total_time_s = level_time_s + spent_ms / 1000.0
     raster_time_s = raster_time_ms(grid, next_px_mm, args.fine_dwell) / 1000.0
     speedup = raster_time_s / total_time_s if total_time_s > 0 else np.inf
 
     print(f"\n  === SCAN PLAN (next level @ {next_px_mm*1000:.0f}um) ===")
     print(f"    Regions to scan   : {len(plan)}")
     print(f"    Total fine pixels : ~{sum(r['n_pixels_x']*r['n_pixels_y'] for r in plan):,}")
-    print(f"    Estimated time    : {total_time_s:.0f} s ({total_time_s/60:.1f} min)")
+    print(f"    Estimated time    : {level_time_s:.0f} s ({level_time_s/60:.1f} min)")
     print(f"      travel + setup  : {overhead['overhead_ms']/1000:.1f} s  "
           f"(travel {overhead['travel_ms']/1000:.1f}s over {overhead['n_regions']} regions)")
+    if spent_ms:
+        print(f"      + earlier levels: {spent_ms/1000:.0f} s  "
+              f"-> total {total_time_s:.0f} s")
     print(f"    Raster baseline   : {raster_time_s:.0f} s ({raster_time_s/60:.1f} min)")
     print(f"    SPEEDUP           : {speedup:.2f}x")
 
@@ -388,7 +421,9 @@ def emit_outputs(stem, comp, grid, mask, dwell_map, plan, strat, desc,
         "descriptor": desc,
         "strategy": strat,
         "next_px_mm": next_px_mm,
-        "estimate": {"total_time_s": total_time_s, "raster_time_s": raster_time_s,
+        "estimate": {"total_time_s": total_time_s, "level_time_s": level_time_s,
+                     "earlier_levels_s": spent_ms / 1000.0,
+                     "raster_time_s": raster_time_s,
                      "speedup": speedup, "n_regions": len(plan),
                      "travel_ms": overhead["travel_ms"],
                      "setup_total_ms": overhead["setup_total_ms"]},
@@ -403,15 +438,10 @@ def emit_outputs(stem, comp, grid, mask, dwell_map, plan, strat, desc,
         json.dump(_json_safe(summary), f, indent=2)
     print(f"\n  JSON plan saved   -> {json_path}")
 
-    pkl_path = OUTPUT_DIR / f"{stem}_scan_plan.pkl"
-    smak_compat = {"regions": [{
-        "yrange": [r["x_start_mm"], r["x_end_mm"], r["fine_px_mm"]],
-        "zrange": [r["y_start_mm"], r["y_end_mm"], r["fine_px_mm"]],
-        "dwell":  r["dwell_uniform_ms"],
-    } for r in plan]}
-    with open(pkl_path, "wb") as f:
-        pickle.dump(smak_compat, f)
-    print(f"  Pickle plan saved -> {pkl_path}")
+    # SMAK "Export scan area to dataqueue" format (see utils.smak_export)
+    dpm_path = OUTPUT_DIR / f"{stem}_scan_plan.dpm"
+    write_smak_regions(dpm_path, plan, grid.get("energy", 0.0), stem)
+    print(f"  SMAK regions saved -> {dpm_path}")
 
     # Exact per-pixel dwell map (0 = not scanned), on the current grid. The
     # region .pkl above is a uniform-per-rectangle approximation; this preserves
@@ -470,7 +500,7 @@ def resolve_ladder(args, sample_hint, current_px):
     if sample_hint:
         lv = available_levels(sample_hint, data_dir=DATA_DIR)
         if lv:
-            return lv
+            return element_ladder(lv, args.max_detect_ratio) if args.target else lv
     return [current_px]   # single-shot fallback
 
 
@@ -502,7 +532,7 @@ def _append_manifest(sample, idx, px_um, strat, summary, fresh=False):
 # ── modes ─────────────────────────────────────────────────────────────────────
 
 def plan_and_emit(dwell_signal, comp, grid, mask, strat, desc, next_px, stem,
-                  args, **gt_kwargs):
+                  args, spent_ms=0.0, **gt_kwargs):
     """
     Shared planning tail for BOTH modes: dwell map -> optional budget match ->
     scan plan -> outputs. Keeping this in one place guarantees the offline
@@ -515,19 +545,87 @@ def plan_and_emit(dwell_signal, comp, grid, mask, strat, desc, next_px, stem,
     mask_eff, dwell_map = make_dwell_map(dwell_signal, grid, mask, strat, args)
     if not args.no_match_budget and strat["method"] != "morpho":
         dwell_map = match_budget(dwell_map, mask_eff, grid, next_px,
-                                 args.fine_dwell, args.dwell_low, args.dwell_high)
+                                 args.fine_dwell, args.dwell_low, args.dwell_high,
+                                 spent_ms=spent_ms)
     plan = build_scan_plan(mask_eff, dwell_map, grid, next_px,
                            group=(strat["method"] != "temporal"),
                            setup_ms=args.setup_ms, margin_fine=args.margin_fine,
                            fine_dwell=args.fine_dwell)
     return emit_outputs(stem, comp, grid, mask_eff, dwell_map, plan, strat,
-                        desc, next_px, args, **gt_kwargs)
+                        desc, next_px, args, spent_ms=spent_ms, **gt_kwargs)
+
+
+def element_roi_mask(comp, k=1.0):
+    """Hot spots of a single element: MAD threshold + 1-pixel safety ring."""
+    m, _, _ = threshold_map(comp, method="mad", k=k)
+    return ndimage.binary_dilation(m)
+
+
+def element_ladder(levels, max_ratio=MAX_DETECT_RATIO):
+    """coarse -> detect -> fine for --target: the cheapest intermediate level
+    fine enough for spatial skipping (e.g. 250 -> 100 -> 25, skipping 50)."""
+    if len(levels) < 3:
+        return list(levels)
+    final = levels[-1]
+    ok = [px for px in levels[1:-1] if px <= max_ratio * final]
+    return [levels[0], ok[0], final] if ok else [levels[0], final]
+
+
+def level_time_ms(d, n_pixels=None):
+    """Acquisition time of a scan [ms] (n_pixels defaults to the full frame)."""
+    n = d["mapdata"].shape[0] * d["mapdata"].shape[1] if n_pixels is None else n_pixels
+    return n * dwell_ms_from_path(d["filepath"])
+
+
+def run_simulate_target(args, sample):
+    """Offline validation of the element-targeted cascade (--target)."""
+    ladder = args.levels or element_ladder(available_levels(sample, data_dir=DATA_DIR),
+                                           args.max_detect_ratio)
+    if len(ladder) < 2:
+        raise SystemExit(f"Need >=2 levels for a cascade; found {ladder} for {sample}")
+    print(f"\n{'='*70}\n  XRF ELEMENT PLANNER - SIMULATE  ({sample}, {args.target})"
+          f"\n{'='*70}")
+    print(f"  Ladder: {' -> '.join(f'{p}um' for p in ladder)}")
+    levels = []
+    for px in ladder:
+        path = find_level_file(sample, px, data_dir=DATA_DIR)
+        if path is None:
+            raise SystemExit(f"No file for {sample} @ {px}um under {DATA_DIR}")
+        d = load_xrf(path)
+        comp, _, _ = get_composite_map(d, [args.target])
+        levels.append({"data": d, "comp": comp, "px": px})
+        print(f"  {px}um: {path.name}  {comp.shape}")
+
+    fine, prev = levels[-1], levels[-2]
+    strat = choose_element_strategy(prev["px"], fine["px"], args.max_detect_ratio)
+    if args.dwell_strategy != "auto":
+        strat["dwell"] = args.dwell_strategy
+    print(f"\n  Strategy: {strat['method']} / {strat['dwell']}  ({strat['why_method']})")
+    if strat["method"] == "roi":
+        m_prev = element_roi_mask(prev["comp"], args.roi_k)
+        mask = project_mask(m_prev, prev["data"]["xdata"], prev["data"]["ydata"],
+                            fine["data"]["xdata"], fine["data"]["ydata"])
+        print(f"  {args.target} ROIs @ {prev['px']}um: {m_prev.mean()*100:.1f}% of area")
+    else:
+        mask = np.ones_like(fine["comp"], dtype=bool)
+    # intermediate levels are full frames in this mode
+    spent = sum(level_time_ms(lv["data"]) for lv in levels[:-1])
+    dwell_signal = project_coarse_to_fine(prev["comp"], prev["data"], fine["data"])
+    # unscanned fine pixels keep the last full-frame level's estimate
+    coarse_fill = coarse_blockmean(fine["comp"], prev["data"], fine["data"])
+    desc = describe_composite(levels[0]["comp"])
+    plan_and_emit(dwell_signal, fine["comp"], fine["data"], mask, strat, desc,
+                  fine["data"]["dx"], f"{sample}_{args.target}_simulate", args,
+                  spent_ms=spent, ground_truth_comp=fine["comp"],
+                  coarse_fill=coarse_fill)
 
 
 def run_simulate(args):
     sample = args.sample or sample_hint_from_path(args.coarse_pos or args.coarse or "")
     if not sample:
         raise SystemExit("--simulate needs --sample (or a coarse path to infer it from)")
+    if args.target:
+        return run_simulate_target(args, sample)
     ladder = args.levels or available_levels(sample, data_dir=DATA_DIR)
     if len(ladder) < 2:
         raise SystemExit(f"Need >=2 levels for a cascade; found {ladder} for {sample}")
@@ -573,10 +671,36 @@ def run_simulate(args):
     # averaged to coarse resolution (same intensity scale; the raw coarse scan
     # sits on a different scale, see utils.validation_utils.coarse_blockmean).
     coarse_fill = coarse_blockmean(fine["comp"], coarse0["data"], fine["data"])
+    # pixels actually acquired at every level before the final one
+    spent = sum(level_time_ms(lv["data"], st["n_scanned"])
+                for lv, st in zip(scans_list[:-1], per_level_stats[:-1]))
     plan_and_emit(dwell_signal, fine["comp"], fine["data"], mask, strat, desc,
-                  next_px, f"{sample}_simulate", args,
+                  next_px, f"{sample}_simulate", args, spent_ms=spent,
                   ground_truth_comp=fine["comp"], per_level_stats=per_level_stats,
                   coarse_fill=coarse_fill)
+
+
+def _target_step(comp, cur_px, idx, ladder, args):
+    """--target footprint/strategy for one stepwise level.
+    Before the detection level: plan a uniform full-frame raster (the cheap
+    detection scan). At the detection level: element ROIs if they are fine
+    enough for the final pixel, else a full-frame sqrt-dwell scan."""
+    full = np.ones_like(comp, dtype=bool)
+    n_tot = comp.size
+    if idx + 2 < len(ladder):
+        strat = {"method": "morpho", "dwell": "uniform",
+                 "why_method": f"detection scan: full frame @ {ladder[idx+1]}um",
+                 "why_dwell": "uniform reference dwell"}
+        mask = full
+    else:
+        strat = choose_element_strategy(cur_px, ladder[-1], args.max_detect_ratio)
+        if args.dwell_strategy != "auto":
+            strat["dwell"] = args.dwell_strategy
+        mask = element_roi_mask(comp, args.roi_k) if strat["method"] == "roi" else full
+    total = float(comp.sum())
+    st = {"area_frac": mask.sum() / n_tot,
+          "signal_in_frac": float(comp[mask].sum()) / total if total > 0 else 0.0}
+    return mask, strat, st
 
 
 def run_step(args):
@@ -592,6 +716,7 @@ def run_step(args):
         ladder = state["ladder"]
         desc, strat = state["desc"], state["strategy"]
         sample = state["sample"]
+        spent = state.get("spent_ms", 0.0)
         cur_px = px_um_of(data)
         # Guard: the acquired scan must match the level this step expects, else the
         # cascade silently mis-steps (project a mask onto the wrong grid).
@@ -606,15 +731,19 @@ def run_step(args):
         print(f"\n{'='*70}\n  XRF ITERATIVE PLANNER - STEP {idx} @ {cur_px}um  ({sample})"
               f"\n{'='*70}")
         print(f"  Resumed from {Path(args.resume).name}")
-        mask, _, st = refine_step(comp, data, prev_mask=prev_mask,
-                                  prev_data=prev_data, kernel_px=args.kernel,
-                                  mode=args.mode, level=args.level)
+        if not args.target:
+            mask, _, st = refine_step(comp, data, prev_mask=prev_mask,
+                                      prev_data=prev_data, kernel_px=args.kernel,
+                                      mode=args.mode, level=args.level)
     else:
         coarse_path = require(args.coarse_pos or args.coarse or find_coarse(),
                               "coarse HDF5")
         data = load_xrf(coarse_path)
         channels = [c.strip() for c in args.channels.split(",")] if args.channels else None
+        if args.target:
+            channels = [args.target]
         comp, used, _ = get_composite_map(data, channels)
+        spent = level_time_ms(data)
         sample = args.sample or sample_hint_from_path(coarse_path) or Path(coarse_path).stem
         cur_px = px_um_of(data)
         ladder = resolve_ladder(args, sample, cur_px)
@@ -639,9 +768,15 @@ def run_step(args):
         print(f"  Strategy: {strat['method']} / {strat['dwell']}")
         print(f"    why method: {strat['why_method']}")
         print(f"    why dwell : {strat['why_dwell']}")
-        mask, _, st = refine_step(comp, data, prev_mask=None, kernel_px=args.kernel,
-                                  mode=args.mode, level=args.level)
+        if not args.target:
+            mask, _, st = refine_step(comp, data, prev_mask=None,
+                                      kernel_px=args.kernel,
+                                      mode=args.mode, level=args.level)
 
+    if args.target:
+        mask, strat, st = _target_step(comp, cur_px, idx, ladder, args)
+        print(f"  {args.target}: {strat['method']} / {strat['dwell']}  "
+              f"({strat['why_method']})")
     print(f"  Footprint: in-mask {st['area_frac']*100:.1f}%  "
           f"signal {st['signal_in_frac']*100:.1f}%")
 
@@ -649,8 +784,11 @@ def run_step(args):
     final_level = idx + 1 >= len(ladder) and len(ladder) > 1
     # Per-step stem so each level's plan is archived (not overwritten).
     stem = f"{sample}_step{idx}_{cur_px}um"
+    # Only the final level is budget-matched against a fine raster, so only
+    # then do the earlier acquisitions count against it.
+    plans_final = idx + 2 == len(ladder)
     summary = plan_and_emit(comp, comp, data, mask, strat, desc, next_px,
-                            stem, args)
+                            stem, args, spent_ms=spent if plans_final else 0.0)
     _append_manifest(sample, idx, cur_px, strat, summary, fresh=not args.resume)
 
     # Persist state so the next acquired level can resume this cascade.
@@ -660,6 +798,8 @@ def run_step(args):
             "sample": sample, "ladder": ladder, "done_idx": idx,
             "desc": desc, "strategy": strat,
             "mask": mask, "xdata": data["xdata"], "ydata": data["ydata"],
+            # acquired so far + the level this plan is about to acquire
+            "spent_ms": spent + summary["estimate"]["level_time_s"] * 1000.0,
         })
         state_path = OUTPUT_DIR / f"{sample}_cascade_state.pkl"
         OUTPUT_DIR.mkdir(exist_ok=True)

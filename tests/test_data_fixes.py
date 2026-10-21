@@ -102,3 +102,30 @@ def test_match_budget_respects_dwell_bounds():
     out = rp.match_budget(dwell, mask, grid, 0.025, 10.0,
                           dwell_low=1.0, dwell_high=50.0)
     assert out[mask].max() <= 50.0
+
+
+def test_sqrt_reg_lifts_noise_floored_pixels():
+    from utils.dwell import allocate_dwell
+    sig = np.array([0.0, 0.0, 1.0, 100.0])
+    plain, _ = allocate_dwell(sig, "sqrt", 1.0, 50.0)
+    reg, _ = allocate_dwell(sig, "sqrt", 1.0, 50.0, reg=1.0)
+    assert plain[0] == 1.0 and reg[0] > plain[0]     # zero estimate not starved
+    assert reg[3] >= reg[2] >= reg[0]                  # still monotone
+
+
+def test_element_ladder_skips_costly_intermediate_level():
+    rp = _load_pipeline()
+    assert rp.element_ladder([250, 100, 50, 25]) == [250, 100, 25]
+    assert rp.element_ladder([250, 100, 50]) == [250, 100, 50]
+    assert rp.element_ladder([250, 25]) == [250, 25]
+
+
+def test_match_budget_deducts_earlier_levels():
+    rp = _load_pipeline()
+    grid = {"xdata": np.arange(10) * 0.25, "ydata": np.arange(10) * 0.25,
+            "dx": 0.25, "dy": 0.25}
+    full = np.ones((10, 10), bool)
+    raster = rp.raster_time_ms(grid, 0.25, 10.0)
+    out = rp.match_budget(np.full((10, 10), 10.0), full, grid, 0.25, 10.0,
+                          spent_ms=0.25 * raster)
+    assert out.sum() == pytest.approx(0.75 * raster)

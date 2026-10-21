@@ -81,7 +81,7 @@ def choose_strategy(desc):
     Apply the recommender rules. Returns a dict with machine-readable tokens
     plus human explanations:
         method      : 'roi' | 'combined' | 'temporal'
-        dwell       : 'binary' | 'log' | 'linear'
+        dwell       : 'sqrt' (binary | log | linear only via overrides)
         why_method  : str
         why_dwell   : str
 
@@ -111,16 +111,13 @@ def choose_strategy(desc):
         why_m = (f"Dense ({f*100:.0f}% area, conc {c*100:.0f}%) -> spatial capped "
                  f"at ~{1/f:.2f}x. Use dwell allocation for SNR gain at equal time")
 
-    if c > 0.60:
-        dwell = "binary"
-        why_d = f"Signal concentrated ({c*100:.0f}% in top-10% pixels) -> binary high/low"
-    elif d > 2.5:
-        dwell = "log"
-        why_d = f"Wide dynamic range ({d:.1f} decades) -> log scaling avoids saturation"
-    else:
-        dwell = "linear"
-        why_d = (f"Smooth distribution (conc {c*100:.0f}%, range {d:.1f}) -> "
-                 f"linear allocation")
+    # Dwell: sqrt is the equal-time Poisson-MSE optimum (utils.quality). The
+    # old concentration/dynamic-range heuristics (binary/linear/log) all score
+    # < 1x vs raster on every sample (2026-10 review), so they are only
+    # available as explicit overrides.
+    dwell = "sqrt"
+    why_d = (f"t ~ sqrt(signal) minimises Poisson MSE at equal time "
+             f"(conc {c*100:.0f}%, range {d:.1f})")
 
     return {"method": method, "dwell": dwell, "why_method": why_m, "why_dwell": why_d}
 
@@ -136,6 +133,7 @@ _DWELL_LABEL = {
     "binary": "dwell binary (high vs low)",
     "log":    "dwell log",
     "linear": "dwell linear",
+    "sqrt":   "dwell sqrt (MSE-optimal)",
 }
 
 
@@ -149,3 +147,32 @@ def recommend(desc):
         (_METHOD_LABEL[s["method"]], s["why_method"]),
         (_DWELL_LABEL[s["dwell"]],   s["why_dwell"]),
     ]
+
+
+# ── Element-targeted spatial rule ─────────────────────────────────────────────
+
+# Measured 2026-10 on UA1/UB1/FP1 (Fe, Zn, Mn, Cu; equal total time including
+# the earlier levels): element ROIs detected at 250um never pay off for a 25um
+# scan (MSE ratio 0.01-0.5x: sub-pixel structure lost in the skipped cells),
+# while ROIs detected at 100um do in most cases (Fe UB1 1.4x, Mn 1.3-2.1x).
+MAX_DETECT_RATIO = 4.0
+
+
+def spatial_allowed(detect_px_um, final_px_um, max_ratio=MAX_DETECT_RATIO):
+    """True if ROIs found at detect_px_um are fine enough to skip area at final_px_um."""
+    return detect_px_um <= max_ratio * final_px_um
+
+
+def choose_element_strategy(detect_px_um, final_px_um, max_ratio=MAX_DETECT_RATIO):
+    """Strategy for a single target element (--target in script 10)."""
+    if spatial_allowed(detect_px_um, final_px_um, max_ratio):
+        return {"method": "roi", "dwell": "sqrt",
+                "why_method": (f"Element ROIs at {detect_px_um}um are <= "
+                               f"{max_ratio:g}x the {final_px_um}um target -> "
+                               f"scan only the element's hot spots"),
+                "why_dwell": "sqrt inside the ROIs (Poisson-MSE optimum)"}
+    return {"method": "temporal", "dwell": "sqrt",
+            "why_method": (f"{detect_px_um}um is > {max_ratio:g}x the "
+                           f"{final_px_um}um target: coarse ROIs miss sub-pixel "
+                           f"hot spots -> full frame, sqrt dwell"),
+            "why_dwell": "sqrt over the full frame (Poisson-MSE optimum)"}

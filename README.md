@@ -52,7 +52,7 @@ python scripts/10_run_pipeline.py --scan data/.../UA1_P1_100um....hdf5 \
 python scripts/10_run_pipeline.py --coarse <coarse>.hdf5 --channels Ti.Ka
 ```
 Outputs per step: a text report, `*_scan_plan.json` (regions + dwells),
-`*_scan_plan.pkl` (SMAK-compatible rectangles), `*_dwell_map.npy` (exact per-pixel
+`*_scan_plan.dpm` (SMAK "Export scan area to dataqueue" region file), `*_dwell_map.npy` (exact per-pixel
 dwell), and a figure.
 
 ### Offline validation — full cascade when all resolutions exist

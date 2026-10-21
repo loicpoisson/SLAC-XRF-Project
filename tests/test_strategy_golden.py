@@ -28,16 +28,16 @@ def test_ua1_descriptors_golden():
     assert d["dynamic_range"] == pytest.approx(1.63, abs=0.05)
 
 
-def test_ua1_strategy_is_temporal_linear():
+def test_ua1_strategy_is_temporal_sqrt():
     s = choose_strategy(describe_sample(_coarse("UA1_P1")))
     assert s["method"] == "temporal"
-    assert s["dwell"] == "linear"
+    assert s["dwell"] == "sqrt"
 
 
-def test_fp1_strategy_is_temporal_log():
+def test_fp1_strategy_is_temporal_sqrt():
     s = choose_strategy(describe_sample(_coarse("FP1_P1")))
     assert s["method"] == "temporal"
-    assert s["dwell"] == "log"
+    assert s["dwell"] == "sqrt"
 
 
 def test_describe_sample_matches_describe_composite():

@@ -6,7 +6,7 @@ so the threshold logic is covered even on CI/Colab where the HDF5 data (and the
 golden tests in test_strategy_golden.py) are absent.
 """
 
-from utils.strategy import choose_strategy
+from utils.strategy import choose_strategy, choose_element_strategy
 
 
 def _desc(sample_frac, concentration, dynamic_range):
@@ -37,16 +37,20 @@ def test_dense_concentrated_is_combined():
 
 # ── dwell rule ─────────────────────────────────────────────────────────────────
 
-def test_high_concentration_gives_binary():
-    assert choose_strategy(_desc(0.5, 0.65, 2.0))["dwell"] == "binary"
+def test_dwell_is_always_sqrt():
+    # binary/linear/log score < 1x vs raster in Poisson MSE; only overrides now
+    for d in (_desc(0.5, 0.65, 2.0), _desc(0.5, 0.5, 3.0), _desc(0.9, 0.2, 1.0)):
+        assert choose_strategy(d)["dwell"] == "sqrt"
 
 
-def test_wide_dynamic_range_gives_log():
-    assert choose_strategy(_desc(0.5, 0.50, 3.0))["dwell"] == "log"
+# ── element-targeted spatial rule ──────────────────────────────────────────────
 
-
-def test_smooth_gives_linear():
-    assert choose_strategy(_desc(0.5, 0.50, 1.5))["dwell"] == "linear"
+def test_element_rois_need_fine_enough_detection():
+    assert choose_element_strategy(100, 25)["method"] == "roi"        # 4x
+    assert choose_element_strategy(250, 25)["method"] == "temporal"   # 10x
+    assert choose_element_strategy(100, 50)["method"] == "roi"
+    assert choose_element_strategy(250, 25, max_ratio=10)["method"] == "roi"
+    assert all(choose_element_strategy(a, 25)["dwell"] == "sqrt" for a in (100, 250))
 
 
 def test_thresholds_are_boundaries():

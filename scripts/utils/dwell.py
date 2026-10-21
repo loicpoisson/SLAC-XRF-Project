@@ -13,7 +13,7 @@ import numpy as np
 
 
 def allocate_dwell(signal, strategy, dwell_low, dwell_high,
-                   threshold=None, mask=None):
+                   threshold=None, mask=None, reg=0.0):
     """
     Compute a per-pixel dwell array (ms) for a given allocation strategy.
 
@@ -27,6 +27,12 @@ def allocate_dwell(signal, strategy, dwell_low, dwell_high,
     mask        : bool array, opt  if given, quantiles are computed over
                                    signal[mask] only; values are still returned
                                    for every pixel (caller masks afterwards).
+    reg         : float            'sqrt' only: allocate on signal + reg *
+                                   mean(pool). The coarse estimate of a weak
+                                   element is shot-noise dominated, and plain
+                                   sqrt floors truly-bright pixels at dwell_low
+                                   (UA1 Mn: MSE ratio 0.38x at reg=0, 0.97x at
+                                   reg=1). reg=1 is the pipeline default.
 
     Returns
     -------
@@ -69,8 +75,11 @@ def allocate_dwell(signal, strategy, dwell_low, dwell_high,
         # capped at dwell_high and floored at dwell_low. x_ref = 95th pct of the
         # pool (robust to outliers). Pair with --match-budget for equal-time scale;
         # the proportional shape is what makes this the optimum, not an affine remap.
-        sq = np.sqrt(np.maximum(x, 0.0))
-        x_ref = np.quantile(np.maximum(pool, 0.0), 0.95)
+        offset = reg * float(np.maximum(pool, 0.0).mean()) if reg else 0.0
+        x = np.maximum(x, 0.0) + offset
+        pool = np.maximum(pool, 0.0) + offset
+        sq = np.sqrt(x)
+        x_ref = np.quantile(pool, 0.95)
         if x_ref <= 0:
             return np.full_like(x, (dwell_low + dwell_high) / 2), None
         dwell = dwell_high * sq / np.sqrt(x_ref)
