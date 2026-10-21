@@ -20,26 +20,41 @@ def _path_length(centers, tour):
 
 # ── group_rois unit consistency ────────────────────────────────────────────────
 
-def test_group_rois_merges_adjacent_boxes_with_coarse_sizes():
-    # Two adjacent 2x2-coarse-pixel ROIs on a 0.25mm grid, fine px 0.025mm.
-    # The true gap between them is tiny, so merging must win over a 500ms setup.
-    # Before the fix, coarse sizes were subtracted from fine-pixel bbox counts,
-    # inflating the gap ~100x and suppressing the merge.
-    boxes = [
-        {"id": 1, "mm": (0.0, 0.25, 0.0, 0.25), "size": 4,
-         "center_mm": (0.125, 0.125), "pixels": None},
-        {"id": 2, "mm": (0.75, 1.0, 0.0, 0.25), "size": 4,
-         "center_mm": (0.875, 0.125), "pixels": None},
-    ]
+def _box(i, x0, x1, y0=0.0, y1=0.25, size=4):
+    # "mm" extents are coarse pixel CENTRES, as get_bounding_boxes returns them
+    return {"id": i, "mm": (x0, x1, y0, y1), "size": size,
+            "center_mm": ((x0 + x1) / 2, (y0 + y1) / 2), "pixels": None}
+
+
+def test_group_rois_merges_touching_boxes_with_coarse_sizes():
+    # Two 2x2-coarse-pixel ROIs (0.25mm grid) side by side: the merged bbox
+    # adds no gap pixels at 25um, so merging saves the 500ms setup.
+    boxes = [_box(1, 0.0, 0.25), _box(2, 0.5, 0.75)]
     merged = group_rois(boxes, dwell_ms=10.0, dx=0.025, dy=0.025,
                         size_px_mm=(0.25, 0.25))
     assert len(merged) == 1
     assert merged[0]["n_original_rois"] == 2
 
-    # Without the conversion the same input must NOT merge (documents why
-    # size_px_mm is required when sizes come from the coarse grid).
-    unmerged = group_rois(boxes, dwell_ms=10.0, dx=0.025, dy=0.025)
-    assert len(unmerged) == 2
+
+def test_group_rois_keeps_boxes_split_by_a_coarse_column():
+    # Same ROIs with one empty coarse column between them: the merged bbox
+    # scans 10x20 = 200 extra fine px = 2000ms, more than travel + 500ms setup.
+    # (Counting bbox extents as centre-to-centre + 1 fine px used to see no
+    # gap at all here and merged them.)
+    boxes = [_box(1, 0.0, 0.25), _box(2, 0.75, 1.0)]
+    merged = group_rois(boxes, dwell_ms=10.0, dx=0.025, dy=0.025,
+                        size_px_mm=(0.25, 0.25))
+    assert len(merged) == 2
+
+
+def test_group_rois_single_pixel_diagonal_neighbours_not_merged():
+    # Diagonal single-pixel ROIs: merged 20x20 bbox = 400 fine px for 200 px
+    # of ROI -> 2000ms of gap vs ~560ms of overhead.
+    boxes = [_box(1, 0.0, 0.0, 0.0, 0.0, size=1),
+             _box(2, 0.25, 0.25, 0.25, 0.25, size=1)]
+    merged = group_rois(boxes, dwell_ms=10.0, dx=0.025, dy=0.025,
+                        size_px_mm=(0.25, 0.25))
+    assert len(merged) == 2
 
 
 # ── threshold_map mask parameter ───────────────────────────────────────────────

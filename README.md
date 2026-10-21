@@ -34,7 +34,7 @@ A descriptor-based **recommender** (`sample_frac`, `sparsity`, `concentration`,
 Poisson photon noise, with analytic + Monte-Carlo estimates. It shows the
 MSE-optimal dwell allocation is **t ∝ √signal** (water-filling) — the `sqrt`
 strategy — and that, at equal scan time, it beats a uniform raster (UA1: MSE ratio
-**1.14×**), while a naïve binary allocation actually *hurts* MSE (0.16×).
+**1.07×** on UA1, see the erratum in the progress report), while a naïve binary allocation actually *hurts* MSE (0.14×).
 
 ## Quick start
 
@@ -69,7 +69,7 @@ python scripts/11_profile_samples.py --per-element   # per element channel
 
 ### Tests
 ```bash
-python -m pytest tests/ -q        # 39 tests (quality, dwell, roi, cascade, strategy)
+python -m pytest tests/ -q        # 58 tests (quality, dwell, roi, cascade, strategy, loader)
 ```
 
 ## Repo layout
@@ -114,7 +114,7 @@ SLAC-XRF-Project/
   equal-time-quality strategy is inspired by this work.
 
 ## Status
-- Phase 1 pipeline: complete, iterative, tested (39 tests), validated on UA1 / UB1 / FP1.
+- Phase 1 pipeline: complete, iterative, tested (58 tests), validated on UA1 / UB1 / FP1.
 - Honest scope: spatial speedup needs **sparse** targets → demonstrated per-element,
   not on the dense composite; temporal `sqrt` improves MSE at equal time on dense samples.
 - Open questions for the beamline (see report §10): per-pixel dwell map vs uniform-dwell

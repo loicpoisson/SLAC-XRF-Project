@@ -228,13 +228,6 @@ def build_scan_plan(mask, dwell_map, grid, next_px_mm, *, group=True,
     return plan
 
 
-def full_area_mm(grid):
-    """(width, height) of the scanned area in mm, including the edge pixels."""
-    w = abs(grid["xdata"].max() - grid["xdata"].min()) + grid["dx"]
-    h = abs(grid["ydata"].max() - grid["ydata"].min()) + grid["dy"]
-    return w, h
-
-
 def make_dwell_map(comp, grid, mask, strat, args):
     """
     Build the per-pixel dwell map for the chosen method.
@@ -262,16 +255,25 @@ def raster_time_ms(grid, next_px_mm, fine_dwell):
     """Full-frame raster baseline [ms] at next_px_mm resolution.
     Single definition shared by match_budget and emit_outputs, so the budget
     matching and the reported speedup always use the same baseline."""
-    w, h = full_area_mm(grid)
+    # Same pixel-count rule as a full-frame region in _region_dict, so a
+    # full-frame plan reports speedup 1.00x (not 1.02x from a bigger baseline).
+    w = abs(grid["xdata"].max() - grid["xdata"].min())
+    h = abs(grid["ydata"].max() - grid["ydata"].min())
     nx_full = int(np.ceil(w / next_px_mm)) + 1
     ny_full = int(np.ceil(h / next_px_mm)) + 1
     return nx_full * ny_full * fine_dwell
 
 
-def match_budget(dwell_map, mask_eff, grid, next_px_mm, fine_dwell):
+def match_budget(dwell_map, mask_eff, grid, next_px_mm, fine_dwell,
+                 dwell_low=None, dwell_high=None):
     """
-    Scale in-mask dwells so the total adaptive time equals the raster baseline
-    at next_px_mm (guarantees speedup >= 1). Returns the scaled dwell_map.
+    Scale in-mask dwells so the in-mask pixel time equals the raster baseline
+    at next_px_mm, then clip to [dwell_low, dwell_high]. Returns the scaled
+    dwell_map.
+
+    This matches the per-pixel budget only: the emitted plan scans whole
+    margined bounding boxes plus travel/setup, so its speedup can still be < 1
+    (and clipping can leave part of the budget unused).
     """
     raster_total_ms = raster_time_ms(grid, next_px_mm, fine_dwell)
 
@@ -280,8 +282,32 @@ def match_budget(dwell_map, mask_eff, grid, next_px_mm, fine_dwell):
     if current_total_ms > 0:
         scale = raster_total_ms / current_total_ms
         dwell_map = np.where(mask_eff, dwell_map * scale, dwell_map)
-        print(f"  Budget matched: dwells scaled by {scale:.3f} so total = raster")
+        if dwell_low is not None or dwell_high is not None:
+            dwell_map = np.where(mask_eff,
+                                 np.clip(dwell_map, dwell_low, dwell_high),
+                                 dwell_map)
+        used = float((dwell_map * mask_eff).sum()) * replicas / raster_total_ms
+        print(f"  Budget matched: dwells scaled by {scale:.3f} "
+              f"(clipped total = {used*100:.0f}% of raster)")
     return dwell_map
+
+
+def _json_safe(obj):
+    """Recursively convert numpy types to JSON; non-finite floats -> null
+    (json.dump would otherwise write Infinity/NaN, which is not valid JSON)."""
+    if isinstance(obj, dict):
+        return {str(k): _json_safe(v) for k, v in obj.items()}
+    if isinstance(obj, (list, tuple)):
+        return [_json_safe(v) for v in obj]
+    if isinstance(obj, np.ndarray):
+        return _json_safe(obj.tolist())
+    if isinstance(obj, (bool, np.bool_)):
+        return bool(obj)
+    if isinstance(obj, (int, np.integer)):
+        return int(obj)
+    if isinstance(obj, (float, np.floating)):
+        return float(obj) if np.isfinite(obj) else None
+    return obj
 
 
 def emit_outputs(stem, comp, grid, mask, dwell_map, plan, strat, desc,
@@ -367,12 +393,14 @@ def emit_outputs(stem, comp, grid, mask, dwell_map, plan, strat, desc,
                      "travel_ms": overhead["travel_ms"],
                      "setup_total_ms": overhead["setup_total_ms"]},
         "quality": quality,
-        "cascade_levels": per_level_stats,
+        # per-level masks are ndarrays (kept in memory for the figures only)
+        "cascade_levels": [{k: v for k, v in st.items() if k != "mask"}
+                           for st in (per_level_stats or [])] or None,
         "regions": plan,
     }
     json_path = OUTPUT_DIR / f"{stem}_scan_plan.json"
     with open(json_path, "w") as f:
-        json.dump(summary, f, indent=2, default=float)
+        json.dump(_json_safe(summary), f, indent=2)
     print(f"\n  JSON plan saved   -> {json_path}")
 
     pkl_path = OUTPUT_DIR / f"{stem}_scan_plan.pkl"
@@ -487,7 +515,7 @@ def plan_and_emit(dwell_signal, comp, grid, mask, strat, desc, next_px, stem,
     mask_eff, dwell_map = make_dwell_map(dwell_signal, grid, mask, strat, args)
     if not args.no_match_budget and strat["method"] != "morpho":
         dwell_map = match_budget(dwell_map, mask_eff, grid, next_px,
-                                 args.fine_dwell)
+                                 args.fine_dwell, args.dwell_low, args.dwell_high)
     plan = build_scan_plan(mask_eff, dwell_map, grid, next_px,
                            group=(strat["method"] != "temporal"),
                            setup_ms=args.setup_ms, margin_fine=args.margin_fine,

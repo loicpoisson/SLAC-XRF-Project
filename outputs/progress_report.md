@@ -11,6 +11,36 @@
 
 ---
 
+> **Erratum (2026-10-20 code review) — read before quoting any number below.**
+> 1. **Element names were wrong.** SMAK stores `mapdata` as `2 + n_labels`
+>    planes (planes 0/1 = stage X/Y; label *i* is plane *i+2*, as SMAK's own
+>    `labels.index(ch) + 2`). The loader read plane *i*, so every channel was
+>    two elements off ("Al" was really Fe, "Ti" was K, "V" was Ca…), and true
+>    Cu/Zn were silently left out of the composite. Fixed in `load_xrf`.
+> 2. **Dwell is not uniform.** The `TIME` channel (and `OCR`, which tracks it)
+>    shows ~65× nominal integration in column 0 and 1.2–4× along the first and
+>    last ~20 columns (fly-scan ramps). Counts are now rescaled by
+>    `median(TIME)/TIME`. Column 0 alone held 42–52 % of the coarse composite
+>    and drove the old concentration / dynamic-range descriptors.
+> 3. `sample_mask` closing erased row 0 / column 0; `group_rois` under-counted
+>    the merged-bbox gap; `10 --simulate` crashed on JSON export. All fixed,
+>    with regression tests (58 tests).
+>
+> **Corrected headline numbers** (same commands as §6/§7):
+> - Equal-time Poisson MSE ratio, sqrt dwell: **UA1 1.07–1.08×**, UB1 1.04×
+>   (linear 0.57/0.55, log 0.57/0.55, binary 0.14/0.13). `sqrt` is still the
+>   only allocation that beats raster, but the margin is small and does not yet
+>   charge the coarse-scan time to the budget.
+> - Recommender (unchanged rules, corrected data): UA1/UB1 → temporal/linear,
+>   FP1 → temporal/log (was combined/binary). It never picks `sqrt`, so the
+>   pipeline's default plan scores **0.58–0.92×** on its own metric.
+> - Per-element sparsity still holds, with the right elements: the sparse
+>   ones are **Fe, Zn, Mn (13–15 % of pixels)**, not Al/Ti/S.
+> - The composite histogram is unimodal (no void/matter split), so
+>   `sample_frac` ≥ 50 % by construction and the `roi` branch is unreachable.
+>
+> The tables and figures below predate this erratum.
+
 ## 0. Executive summary (for a first read)
 
 - **Spatial speedup needs a sparse target.** On the **composite** (all elements summed) our samples are **dense** (75–82 % of the area occupied) → a plain fine raster is competitive; spatial skipping can't win. This is a physical ceiling, confirmed across the whole dataset.

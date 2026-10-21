@@ -111,6 +111,8 @@ def threshold_map(channel_map, method="auto", k=2.0, mask=None):
         x = channel_map[mask].ravel().astype(float)
     else:
         x = channel_map.ravel().astype(float)
+    if x.size == 0:
+        return np.zeros(channel_map.shape, dtype=bool), np.nan, method
 
     candidates = {
         "mad":     _thresh_mad(x, k),
@@ -228,7 +230,9 @@ def sample_mask(composite, kernel_px=2, mode="otsu_lower", level=50.0,
     o_px = opening_px if opening_px is not None else 0
     if c_px > 0:
         structure = np.ones((c_px, c_px), dtype=bool)
-        mask = ndimage.binary_closing(mask, structure=structure)
+        # pad first: closing on the raw array erodes the first row/column away
+        padded = np.pad(mask, c_px, constant_values=False)
+        mask = ndimage.binary_closing(padded, structure=structure)[c_px:-c_px, c_px:-c_px]
     if o_px > 0:
         structure = np.ones((o_px, o_px), dtype=bool)
         mask = ndimage.binary_opening(mask, structure=structure)
@@ -360,6 +364,13 @@ def travel_time(distance_mm, v_max=V_MAX_MM_S, a_max=A_MAX_MM_S2):
     return v_max / a_max + distance_mm / v_max
 
 
+def _bbox_fine_px(w, h, dx, dy, cell_x, cell_y):
+    """Fine pixels in a bbox whose centre-to-centre extent is (w, h) [mm]."""
+    nx = np.round(np.abs(w) / dx).astype(int) + cell_x
+    ny = np.round(np.abs(h) / dy).astype(int) + cell_y
+    return nx * ny
+
+
 def group_rois(boxes, dwell_ms, dx, dy,
                v_max=V_MAX_MM_S, a_max=A_MAX_MM_S2, setup_ms=SETUP_MS,
                size_px_mm=None):
@@ -406,6 +417,10 @@ def group_rois(boxes, dwell_ms, dx, dy,
     if size_px_mm is not None:
         factor = (size_px_mm[0] / dx) * (size_px_mm[1] / dy)
         size = np.maximum(1, np.round(size * factor)).astype(int)
+        cell_x = max(1, int(round(size_px_mm[0] / dx)))
+        cell_y = max(1, int(round(size_px_mm[1] / dy)))
+    else:
+        cell_x = cell_y = 1
     n_orig = np.ones(len(boxes), dtype=int)   # original ROI count per group
 
     d_crit = v_max ** 2 / a_max
@@ -417,11 +432,12 @@ def group_rois(boxes, dwell_ms, dx, dy,
         my0 = np.minimum(y0[:, None], y0[None, :])
         my1 = np.maximum(y1[:, None], y1[None, :])
 
-        # pixels in merged bbox at fine resolution
-        merged_nx = np.maximum(1, np.round(np.abs(mx1 - mx0) / dx).astype(int) + 1)
-        merged_ny = np.maximum(1, np.round(np.abs(my1 - my0) / dy).astype(int) + 1)
-        n_merged  = merged_nx * merged_ny
-        n_gap     = np.maximum(0, n_merged - size[:, None] - size[None, :])
+        # Fine pixels scanned for the merged bbox vs the two separate bboxes.
+        # Extents are pixel CENTRES on the source grid, so each bbox spans
+        # its centre-to-centre extent plus one source cell.
+        n_merged = _bbox_fine_px(mx1 - mx0, my1 - my0, dx, dy, cell_x, cell_y)
+        n_own    = _bbox_fine_px(x1 - x0, y1 - y0, dx, dy, cell_x, cell_y)
+        n_gap    = np.maximum(0, n_merged - n_own[:, None] - n_own[None, :])
 
         # Edge-to-edge distance
         dxv = np.maximum(0.0, np.maximum(x0[:, None], x0[None, :]) -
