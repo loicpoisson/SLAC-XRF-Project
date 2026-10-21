@@ -48,8 +48,10 @@ python scripts/10_run_pipeline.py --coarse data/.../UA1_P1_250um....hdf5
 # step N: feed the level you just acquired, plan the next one
 python scripts/10_run_pipeline.py --scan data/.../UA1_P1_100um....hdf5 \
        --resume outputs/UA1_P1_cascade_state.pkl
-# focus a single (sparse) element:
-python scripts/10_run_pipeline.py --coarse <coarse>.hdf5 --channels Ti.Ka
+# target one element (recommended): 250um -> full-frame 100um detection scan
+# -> 25um scan of that element's hot spots only, sqrt dwell
+python scripts/10_run_pipeline.py --coarse <coarse>.hdf5 --target Zn.Ka
+python scripts/10_run_pipeline.py --scan <100um>.hdf5 --resume outputs/<S>_cascade_state.pkl --target Zn.Ka
 ```
 Outputs per step: a text report, `*_scan_plan.json` (regions + dwells),
 `*_scan_plan.dpm` (SMAK "Export scan area to dataqueue" region file), `*_dwell_map.npy` (exact per-pixel
@@ -57,8 +59,13 @@ dwell), and a figure.
 
 ### Offline validation — full cascade when all resolutions exist
 ```bash
-python scripts/10_run_pipeline.py --simulate --sample UA1_P1            # capture %, MSE, speedup
-python scripts/10_run_pipeline.py --simulate --sample UA1_P1 --dwell-strategy sqrt
+python scripts/10_run_pipeline.py --simulate --sample UA1_P1                  # composite
+python scripts/10_run_pipeline.py --simulate --sample UB1_P1 --target Zn.Ka   # one element
+```
+MSE ratios are at equal total time, including the earlier levels (see §13 of
+the progress report: element targeting wins 1.1-1.5x in 8/9 cases, the
+composite cascade does not).
+```bash
 ```
 
 ### Profile samples by sparsity (where does adaptive help?)
@@ -69,7 +76,7 @@ python scripts/11_profile_samples.py --per-element   # per element channel
 
 ### Tests
 ```bash
-python -m pytest tests/ -q        # 58 tests (quality, dwell, roi, cascade, strategy, loader)
+python -m pytest tests/ -q        # 71 tests (quality, dwell, roi, cascade, strategy, loader, SMAK export)
 ```
 
 ## Repo layout
@@ -114,7 +121,7 @@ SLAC-XRF-Project/
   equal-time-quality strategy is inspired by this work.
 
 ## Status
-- Phase 1 pipeline: complete, iterative, tested (58 tests), validated on UA1 / UB1 / FP1.
+- Phase 1 pipeline: complete, iterative, tested (71 tests), validated on UA1 / UB1 / FP1.
 - Honest scope: spatial speedup needs **sparse** targets → demonstrated per-element,
   not on the dense composite; temporal `sqrt` improves MSE at equal time on dense samples.
 - Open questions for the beamline (see report §10): per-pixel dwell map vs uniform-dwell

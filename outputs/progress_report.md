@@ -438,4 +438,79 @@ not a speed play).*
 *FP1_P1: recommender picks combined (dense but concentrated), so the plan keeps a
 spatial footprint plus a variable dwell inside it.*
 
-*End of report (v2).*
+
+
+---
+
+## 13. October 2026 update (v3) — element-targeted planning
+
+All numbers below use the corrected loader (channel offset + TIME
+normalisation, see the erratum at the top) and an **honest budget**: the time
+of every earlier cascade level is deducted from the fine-raster budget and
+included in the reported speedup.
+
+### 13.1 What the measurements say
+
+| Question | Answer (UA1/UB1/FP1) |
+|---|---|
+| Composite, dwell only (`sqrt`, 250 → 25 µm) | ≈ raster: MSE ratio 1.01–1.02× |
+| Full composite cascade 250/100/50/25 | **worse** than raster (0.72–0.84×): the 50 µm level alone costs 25 % of a 25 µm raster |
+| Element ROIs detected at **250 µm**, scan 25 µm | always worse (0.01–0.5×): hot spots smaller than a 250 µm cell are skipped |
+| Element ROIs detected at **100 µm**, scan 25 µm (50 µm for FP1) | **better in 8/9 cases** (table below) |
+| Plain `sqrt` dwell on weak elements (Mn, Cu) | 0.36–0.54×: the coarse estimate is shot noise; `sqrt(signal + mean)` fixes it (0.94–1.43×) |
+
+`10_run_pipeline.py --simulate --sample <S> --target <EL>` (ladder 250 → 100 → final):
+
+| sample | element | ROI area @100 µm | signal in ROIs | MSE ratio (equal time) | plan speedup |
+|---|---|---|---|---|---|
+| UA1_P1 | Fe.Ka | 69 % | 90 % | 0.81× | 0.71× |
+| UB1_P1 | Fe.Ka | 64 % | 91 % | **1.35×** | 0.64× |
+| FP1_P1 | Fe.Ka | 64 % | 97 % | **1.08×** | 0.67× |
+| UA1_P1 | Mn.Ka | 57 % | 64 % | **1.31×** | 0.58× |
+| UB1_P1 | Mn.Ka | 52 % | 58 % | **1.34×** | 0.39× |
+| FP1_P1 | Mn.Ka | 58 % | 93 % | **1.49×** | 0.65× |
+| UA1_P1 | Zn.Ka | 66 % | 90 % | **1.24×** | 0.68× |
+| UB1_P1 | Zn.Ka | 59 % | 87 % | **1.46×** | 0.57× |
+| FP1_P1 | Zn.Ka | 66 % | 81 % | **1.17×** | 0.73× |
+
+**How to read the two last columns.** The MSE ratio assumes the scanner
+executes the per-pixel dwell map inside the ROI mask at equal total time. The
+plan speedup is what the exported **rectangles** would cost: each rectangle is
+scanned at the mean dwell of its pixels and covers the gaps between hot spots,
+so it takes 1.4–2.5× longer than the mask itself. **Whether the gain is real on
+the beamline therefore depends on question 1 below.**
+
+### 13.2 Questions for Sam (replace §10)
+
+1. **Per-pixel dwell.** Can the 6-2 / 7-2 scanner execute a per-pixel (or
+   per-line) dwell map? If yes, the element-targeted plan is worth
+   1.1–1.5× at equal time. If it only accepts rectangles at a uniform dwell,
+   the rectangles cost more than they save.
+2. **TIME channel.** Column 0 integrates ~65× longer and the first/last ~20
+   columns 1.2–4× (OCR tracks TIME exactly). Is this the fly-scan
+   acceleration ramp / line flyback? Is dividing by TIME the right
+   correction, or should those columns be dropped?
+3. **Channel layout.** `mapdata` has 27 planes for 25 labels; planes 0/1 are
+   the stage X/Y positions (SMAK reads `labels.index(ch) + 2`). Is this always
+   true for files from the dataserver?
+4. **Dataqueue format.** We now write `*_scan_plan.dpm` exactly as SMAK's
+   "Export scan area to dataqueue" does (`DATASERVER REGIONS` header + pickled
+   `{i: ['image', region]}`). Which values are valid for `scantype`,
+   `scandir`, `ooptics`, `slave`, `wheel`, and what should `file` hold? Does
+   the dataserver read `zrange`'s negative step as top-to-bottom?
+5. **Target elements.** Which elements matter scientifically on these
+   samples? Fe, Zn and Mn are where the pipeline currently wins.
+6. **Kinematics.** v_max = 200 mm/s, a_max = 500 mm/s² and 500 ms setup per
+   region (from Paper 1): are these right for 6-2 / 7-2?
+
+### 13.3 Next steps
+
+1. Get the answers to Q1 and Q4, then emit what the scanner can execute
+   (dwell map, or dwell-banded rectangles if only rectangles are possible).
+2. Re-run on more samples / elements before claiming the 1.1–1.5× gain;
+   report Monte-Carlo error bars (`--mc-draws`).
+3. Phase 2: the U-Net notebook now predicts the budget-normalised `sqrt`
+   dwell map with a leave-one-sample-out split (see `phase2_ml/README.md`);
+   the question is whether it beats the coarse `sqrt` heuristic.
+
+*End of report (v3).*
