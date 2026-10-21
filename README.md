@@ -65,8 +65,6 @@ python scripts/10_run_pipeline.py --simulate --sample UB1_P1 --target Zn.Ka   # 
 MSE ratios are at equal total time, including the earlier levels (see §13 of
 the progress report: element targeting wins 1.1-1.5x in 8/9 cases, the
 composite cascade does not).
-```bash
-```
 
 ### Profile samples by sparsity (where does adaptive help?)
 ```bash
