@@ -56,12 +56,13 @@ from utils.cascade import (find_level_file, available_levels, refine_step,
                            refine_cascade, dwell_ms_from_path)
 from utils.roi_utils import (label_rois, get_bounding_boxes, group_rois, add_margin,
                              element_roi_mask)
-from utils.validation_utils import (coarse_blockmean, project_coarse_to_fine,
+from utils.validation_utils import (project_coarse_to_fine,
                                     project_mask,
                                      travel_overhead_from_centers)
 from utils.quality import poisson_mse, poisson_mse_montecarlo, mean_snr
 from utils.plotting import save_and_show
 from utils.smak_export import write_smak_regions
+from utils.reconstruction import calibrate_scale, reconstruct
 from utils.paths import (find_coarse, require, sample_hint_from_path,
                          PROJECT_ROOT, DATA_DIR)
 
@@ -133,6 +134,10 @@ def parse_args():
                    help="Safety margin added around grouped ROIs [fine pixels]")
     p.add_argument("--mc-draws", default=0, type=int,
                    help="Poisson Monte-Carlo draws for the MSE metric (0 = analytic only)")
+    p.add_argument("--coarse-scale", default=None, type=float,
+                   help="coarse->fine count scale for the reconstruction of the "
+                        "skipped pixels (default: measured on the other samples "
+                        "in data/, leave-one-sample-out)")
     p.add_argument("--no-show", action="store_true",
                    help="Save figures without opening a window")
     return p.parse_args()
@@ -555,6 +560,43 @@ def plan_and_emit(dwell_signal, comp, grid, mask, strat, desc, next_px, stem,
                         desc, next_px, args, spent_ms=spent_ms, **gt_kwargs)
 
 
+def coarse_scale_for(args, sample, channels, coarse_px, fine_px):
+    """--coarse-scale, else the leave-one-sample-out calibration."""
+    if args.coarse_scale is not None:
+        return args.coarse_scale
+    s, n = calibrate_scale(sample, channels, coarse_px, fine_px)
+    if n == 0:
+        print(f"  WARNING: no other sample with {coarse_px}um and {fine_px}um "
+              f"scans to calibrate the reconstruction; using scale 1.0 "
+              f"(pass --coarse-scale)")
+    else:
+        print(f"  Reconstruction scale {coarse_px}->{fine_px}um: {s:.3f} "
+              f"(from {n} other sample{'s' if n > 1 else ''})")
+    return s
+
+
+def save_reconstruction(stem, recon, scanned, grid, args):
+    """Write the reconstructed fine map (.npy, counts at the fine dwell) and a
+    figure with the scanned area outlined."""
+    OUTPUT_DIR.mkdir(exist_ok=True)
+    npy = OUTPUT_DIR / f"{stem}_reconstruction.npy"
+    np.save(npy, recon)
+    fig, ax = plt.subplots(figsize=(8, 6))
+    ext = [grid["xdata"].min(), grid["xdata"].max(),
+           grid["ydata"].min(), grid["ydata"].max()]
+    im = ax.imshow(np.log1p(np.maximum(recon, 0)), origin="lower", extent=ext,
+                   cmap="magma", aspect="equal")
+    if scanned.any() and not scanned.all():
+        ax.contour(grid["xdata"], grid["ydata"], scanned.astype(float), [0.5],
+                   colors="cyan", linewidths=0.6)
+    ax.set_title(f"{stem}\nreconstruction (cyan: scanned at fine resolution)",
+                 fontsize=10)
+    ax.set_xlabel("x [mm]"); ax.set_ylabel("y [mm]")
+    fig.colorbar(im, ax=ax, label="log(1 + counts)")
+    save_and_show(fig, OUTPUT_DIR / f"{stem}_reconstruction.png", show=not args.no_show)
+    print(f"  Reconstruction    -> {npy}")
+
+
 def element_ladder(levels, max_ratio=MAX_DETECT_RATIO):
     """coarse -> detect -> fine for --target: the cheapest intermediate level
     fine enough for spatial skipping (e.g. 250 -> 100 -> 25, skipping 50)."""
@@ -605,13 +647,19 @@ def run_simulate_target(args, sample):
     # intermediate levels are full frames in this mode
     spent = sum(level_time_ms(lv["data"]) for lv in levels[:-1])
     dwell_signal = project_coarse_to_fine(prev["comp"], prev["data"], fine["data"])
-    # unscanned fine pixels keep the last full-frame level's estimate
-    coarse_fill = coarse_blockmean(fine["comp"], prev["data"], fine["data"])
+    # Unscanned fine pixels: graph-harmonic interpolation of the last
+    # full-frame level (a measured scan - never the fine truth).
+    scale = coarse_scale_for(args, sample, [args.target], prev["px"], fine["px"])
+    recon, coarse_fill = reconstruct(
+        prev["comp"], prev["data"], fine["data"], mask, fine["comp"], scale,
+        dwell_ms_from_path(prev["data"]["filepath"]), args.fine_dwell)
     desc = describe_composite(levels[0]["comp"])
+    stem = f"{sample}_{args.target}_simulate"
     plan_and_emit(dwell_signal, fine["comp"], fine["data"], mask, strat, desc,
-                  fine["data"]["dx"], f"{sample}_{args.target}_simulate", args,
+                  fine["data"]["dx"], stem, args,
                   spent_ms=spent, ground_truth_comp=fine["comp"],
                   coarse_fill=coarse_fill)
+    save_reconstruction(stem, recon, mask, fine["data"], args)
 
 
 def run_simulate(args):
@@ -661,10 +709,14 @@ def run_simulate(args):
     prev = scans_list[-2]
     dwell_signal = project_coarse_to_fine(prev["comp"], prev["data"], fine["data"])
     next_px = fine["data"]["dx"]   # finest level scans at its own resolution
-    # Fill for unscanned pixels in the MSE bias term = the fine truth block-
-    # averaged to coarse resolution (same intensity scale; the raw coarse scan
-    # sits on a different scale, see utils.validation_utils.coarse_blockmean).
-    coarse_fill = coarse_blockmean(fine["comp"], coarse0["data"], fine["data"])
+    # Fill for unscanned pixels = graph-harmonic interpolation of the coarsest
+    # (full-frame) scan, calibrated on the other samples. It used to be the
+    # block mean of the fine truth, which leaks the answer and assumes coarse
+    # pixels integrate their whole cell (they do not; report section 14).
+    scale = coarse_scale_for(args, sample, ref_channels, ladder[0], ladder[-1])
+    recon, coarse_fill = reconstruct(
+        coarse0["comp"], coarse0["data"], fine["data"], mask, fine["comp"], scale,
+        dwell_ms_from_path(coarse0["data"]["filepath"]), args.fine_dwell)
     # pixels actually acquired at every level before the final one
     spent = sum(level_time_ms(lv["data"], st["n_scanned"])
                 for lv, st in zip(scans_list[:-1], per_level_stats[:-1]))
@@ -672,6 +724,29 @@ def run_simulate(args):
                   next_px, f"{sample}_simulate", args, spent_ms=spent,
                   ground_truth_comp=fine["comp"], per_level_stats=per_level_stats,
                   coarse_fill=coarse_fill)
+    save_reconstruction(f"{sample}_simulate", recon, mask, fine["data"], args)
+
+
+def _final_reconstruction(args, state, data, comp, cur_px):
+    """Last level acquired: assemble the final map (fine scan where it was
+    planned, graph-harmonic interpolation of the previous level elsewhere)."""
+    if "comp" not in state:
+        raise SystemExit("This state file predates the reconstruction step; "
+                         "re-run the cascade from step 0.")
+    prev = {"xdata": state["xdata"], "ydata": state["ydata"]}
+    if state["strategy"]["method"] == "temporal":
+        scanned = np.ones_like(comp, dtype=bool)
+    else:
+        scanned = project_mask(state["mask"], prev["xdata"], prev["ydata"],
+                               data["xdata"], data["ydata"])
+    print(f"\n  Final level @ {cur_px}um: scanned {scanned.mean()*100:.1f}% of the frame")
+    scale = coarse_scale_for(args, state["sample"], state["channels"],
+                             state["px"], cur_px)
+    recon, _ = reconstruct(state["comp"], prev, data, scanned, comp, scale,
+                           state["dwell_ms"], dwell_ms_from_path(data["filepath"]))
+    stem = f"{state['sample']}_step{state['done_idx'] + 1}_{cur_px}um"
+    save_reconstruction(stem, recon, scanned, data, args)
+    print("  Cascade complete.")
 
 
 def _target_step(comp, cur_px, idx, ladder, args):
@@ -725,6 +800,8 @@ def run_step(args):
         print(f"\n{'='*70}\n  XRF ITERATIVE PLANNER - STEP {idx} @ {cur_px}um  ({sample})"
               f"\n{'='*70}")
         print(f"  Resumed from {Path(args.resume).name}")
+        if idx == len(ladder) - 1 and len(ladder) > 1:
+            return _final_reconstruction(args, state, data, comp, cur_px)
         if not args.target:
             mask, _, st = refine_step(comp, data, prev_mask=prev_mask,
                                       prev_data=prev_data, kernel_px=args.kernel,
@@ -792,6 +869,8 @@ def run_step(args):
             "sample": sample, "ladder": ladder, "done_idx": idx,
             "desc": desc, "strategy": strat,
             "mask": mask, "xdata": data["xdata"], "ydata": data["ydata"],
+            # this level's map, kept to reconstruct the skipped fine pixels
+            "comp": comp, "px": cur_px, "dwell_ms": dwell_ms_from_path(data["filepath"]),
             # acquired so far + the level this plan is about to acquire
             "spent_ms": spent + summary["estimate"]["level_time_s"] * 1000.0,
         })

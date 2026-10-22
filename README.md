@@ -55,7 +55,11 @@ python scripts/10_run_pipeline.py --scan <100um>.hdf5 --resume outputs/<S>_casca
 ```
 Outputs per step: a text report, `*_scan_plan.json` (regions + dwells),
 `*_scan_plan.dpm` (SMAK "Export scan area to dataqueue" region file), `*_dwell_map.npy` (exact per-pixel
-dwell), and a figure.
+dwell), and a figure. When the last level is fed back with `--resume`, the
+cascade ends with `*_reconstruction.npy/.png`: the fine scan where it was
+planned, and a graph-harmonic interpolation of the previous level elsewhere
+(coarse->fine scale calibrated on the other samples in `data/`, or
+`--coarse-scale`). `--simulate` scores that same reconstruction.
 
 ### Offline validation — full cascade when all resolutions exist
 ```bash
@@ -80,7 +84,7 @@ python scripts/11_profile_samples.py --per-element   # per element channel
 
 ### Tests
 ```bash
-python -m pytest tests/ -q        # 86 tests
+python -m pytest tests/ -q        # 88 tests
 ```
 
 ## Repo layout
@@ -125,7 +129,7 @@ SLAC-XRF-Project/
   equal-time-quality strategy is inspired by this work.
 
 ## Status
-- Phase 1 pipeline: complete, iterative, tested (86 tests), validated on UA1 / UB1 / FP1.
+- Phase 1 pipeline: complete, iterative, tested (88 tests), validated on UA1 / UB1 / FP1.
 - Honest scope: spatial speedup needs **sparse** targets → demonstrated per-element,
   not on the dense composite; temporal `sqrt` improves MSE at equal time on dense samples.
 - Open questions for the beamline (see report §10): per-pixel dwell map vs uniform-dwell

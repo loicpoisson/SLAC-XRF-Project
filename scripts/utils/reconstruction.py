@@ -86,7 +86,7 @@ def _grid_laplacian(ny, nx):
 
 
 def fill_harmonic(c_rate, cdata, fdata, mask, meas, lam=1.0, w_coarse=1.0,
-                  w_fine=1.0, x0=None, maxiter=2000):
+                  w_fine=1.0, x0=None, maxiter=20000):
     """Label propagation on the fine grid graph.
 
     Minimises  sum_i w_i (f_i - y_i)^2 + lam * sum_(i~j) (f_i - f_j)^2
@@ -107,9 +107,14 @@ def fill_harmonic(c_rate, cdata, fdata, mask, meas, lam=1.0, w_coarse=1.0,
     if x0 is None:
         x0 = fill_bilinear(c_rate, cdata, fdata)
     pre = sparse.diags(1.0 / M.diagonal())
-    f, info = cg(M, w * y, x0=x0.ravel(), M=pre, maxiter=maxiter, rtol=1e-6)
+    b = w * y
+    f, info = cg(M, b, x0=x0.ravel(), M=pre, maxiter=maxiter, rtol=1e-6)
     if info != 0:
-        raise RuntimeError(f"harmonic CG did not converge (info={info})")
+        # sparse anchors (250um -> 25um: 1 per 100 px) converge slowly; accept
+        # a solution that is accurate to 1e-4, refuse anything worse
+        rel = np.linalg.norm(M @ f - b) / max(np.linalg.norm(b), 1e-300)
+        if rel > 1e-4:
+            raise RuntimeError(f"harmonic CG did not converge (rel. residual {rel:.1e})")
     return np.maximum(f.reshape(ny, nx), 0.0)
 
 
@@ -185,3 +190,59 @@ def fill_kriging(c_rate, cdata, fdata, mask, meas, dwell, coarse_var,
         wts = np.linalg.solve(C, c0[..., None])[..., 0]
         out[qy[s:s + chunk], qx[s:s + chunk]] += np.einsum("nk,nk->n", wts, av[nb])
     return np.maximum(out, 0.0)
+
+
+# ── coarse -> fine intensity calibration (leave-one-sample-out) ────────────────
+
+def calibrate_scale(sample, channels, coarse_px, fine_px, candidates=None,
+                    data_dir=None, dwell_ms=10):
+    """Coarse->fine count scale for `sample`, measured on OTHER samples.
+
+    A 100 um pixel does not hold the same counts as a 25 um pixel at the same
+    dwell (~0.7x at 100->25, ~1.0x at 100->50 on the May 2026 scans), so the
+    coarse map must be rescaled before it fills fine pixels. The factor is
+    mean(fine) / mean(coarse projected) on every other sample that has both a
+    `coarse_px` and a `fine_px` scan at `dwell_ms`.
+    Returns (scale, n_samples_used); (1.0, 0) when no other sample qualifies.
+    """
+    from pathlib import Path
+    from .hdf5_reader import load_xrf, get_composite_map
+    from .cascade import find_level_file
+    from .paths import DATA_DIR, sample_hint_from_path
+    base = Path(data_dir) if data_dir else DATA_DIR
+    if candidates is None:
+        candidates = sorted({sample_hint_from_path(p) for p in
+                             base.rglob(f"*_{coarse_px}um_*.hdf5")} - {None})
+    scales = []
+    for other in candidates:
+        if other == sample:
+            continue
+        pc = find_level_file(other, coarse_px, data_dir=base)
+        pf = next(iter(sorted(base.rglob(f"*{other}_{fine_px}um_{dwell_ms}ms_*.hdf5"))), None)
+        if pc is None or pf is None:
+            continue
+        dc, df = load_xrf(pc), load_xrf(pf)
+        try:
+            c, used, _ = get_composite_map(dc, channels)
+            f, _, _ = get_composite_map(df, used)
+        except ValueError:
+            continue
+        cf = project_coarse_to_fine(c, dc, df)
+        if cf.mean() > 0:
+            scales.append(float(f.mean()) / float(cf.mean()))
+    return (float(np.mean(scales)), len(scales)) if scales else (1.0, 0)
+
+
+def reconstruct(coarse_counts, cdata, fdata, scanned, fine_counts, scale,
+                t_coarse, t_fine):
+    """Final fine map of an adaptive scan, in counts at the fine dwell `t_fine`:
+    the fine measurement where `scanned`, elsewhere the graph-harmonic
+    interpolation of the coarse point samples (coarse anchors only - see the
+    module docstring for why the fine anchors are left out).
+    Returns (reconstructed, fill)."""
+    if scanned.all():                       # nothing skipped, nothing to fill
+        return fine_counts.copy(), fine_counts.copy()
+    c_rate = coarse_rate(coarse_counts, scale, t_coarse)
+    fill = fill_harmonic(c_rate, cdata, fdata, scanned,
+                         np.zeros(scanned.shape), w_fine=0.0) * t_fine
+    return np.where(scanned, fine_counts, fill), fill

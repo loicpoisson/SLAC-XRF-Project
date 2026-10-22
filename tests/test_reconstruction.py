@@ -54,3 +54,23 @@ def test_kriging_equals_trend_without_fine_structure():
     out = fill_kriging(c, cd, fd, mask, np.where(mask, trend, 0.0),
                        np.where(mask, 10.0, 0.0), np.full((10, 10), 1e-3))
     np.testing.assert_allclose(out[~mask], trend[~mask], atol=1e-6)
+
+
+def test_reconstruct_keeps_measurements_and_fills_the_rest():
+    from utils.reconstruction import reconstruct
+    cd, fd = _grids()
+    n = len(fd["xdata"])
+    coarse = np.full((10, 10), 20.0)                  # counts at 10 ms
+    fine = np.full((n, n), 7.0)
+    scanned = np.zeros((n, n), bool); scanned[:, : n // 2] = True
+    recon, fill = reconstruct(coarse, cd, fd, scanned, fine, scale=0.5,
+                              t_coarse=10.0, t_fine=10.0)
+    np.testing.assert_array_equal(recon[scanned], 7.0)
+    np.testing.assert_allclose(recon[~scanned], 20.0 * 0.5, rtol=1e-4)
+    full, _ = reconstruct(coarse, cd, fd, np.ones((n, n), bool), fine, 0.5, 10.0, 10.0)
+    np.testing.assert_array_equal(full, fine)
+
+
+def test_calibrate_scale_without_other_samples(tmp_path):
+    from utils.reconstruction import calibrate_scale
+    assert calibrate_scale("XX", None, 100, 25, data_dir=tmp_path) == (1.0, 0)

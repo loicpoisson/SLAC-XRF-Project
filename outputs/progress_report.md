@@ -660,9 +660,12 @@ Mn/Cu is gone (UB1 Mn keeps a 5-point loss).
 `--target <element>`: 250 µm → full 100 µm → 25 µm scan of the element's
 100 µm hot spots (MAD k = 1, 1-pixel ring) with √ dwell (reg 1), and the
 skipped pixels reconstructed by graph-harmonic interpolation of the 100 µm
-points. Open items: wire `fill_harmonic(..., w_fine=0)` into
-`10_run_pipeline.py` as the reconstruction it outputs (its `--simulate` MSE still
-uses the truth block mean, which §14 showed is optimistic); confirm Q7/Q8 with
-Sam; more samples.
+points. This is now what `10_run_pipeline.py` does: the final `--resume` step
+writes `<sample>_stepN_<px>um_reconstruction.npy/.png`, and `--simulate` scores
+that reconstruction instead of the truth block mean (its single-scan Poisson
+MSE is not debiased, so it reads lower than §15.2: UB1 Cu 1.35× vs 2.97×; use
+script 13 for the reference numbers). Open items: emit per-line variable-dwell
+scans (the scanner can do it, Boltz et al. 2026) instead of uniform-dwell
+rectangles; confirm Q7/Q8 with Sam; more samples.
 
 *End of report (v5).*

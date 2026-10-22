@@ -55,7 +55,7 @@ from utils.evaluation import (budget_dwell, sqrt_weight, coarse_to_fine_scale,
                               hot_spots, simulate_tasks, register_rows,
                               sqrt_errors, top_share)
 from utils.reconstruction import (coarse_rate, fill_bilinear, fill_harmonic,
-                                  fill_kriging)
+                                  fill_kriging, calibrate_scale)
 from utils.paths import PROJECT_ROOT, DATA_DIR
 
 SAMPLES = {"UA1_P1": 25, "UB1_P1": 25, "FP1_P1": 50}   # finest full scan per sample
@@ -116,21 +116,9 @@ def load_sample(sample, target):
 
 
 def calibration(sample, target, level, fine_px):
-    """Leave-one-sample-out coarse->fine scale: mean over the OTHER samples
-    that have both `level` and a `fine_px` 10 ms scan."""
-    scales = []
-    for other in SAMPLES:
-        if other == sample:
-            continue
-        pc, pf = find_level_file(other, level), _file(other, fine_px, 10)
-        if pc is None or pf is None:
-            continue
-        dc, df = load_xrf(pc), load_xrf(pf)
-        ch = None if target == "composite" else [target]
-        c, used = _maps(dc, ch)
-        f = _maps(df, used)[0]
-        scales.append(coarse_to_fine_scale(project_coarse_to_fine(c, dc, df), f))
-    return float(np.mean(scales)) if scales else 1.0
+    """Leave-one-sample-out coarse->fine scale (utils.reconstruction)."""
+    ch = None if target == "composite" else [target]
+    return calibrate_scale(sample, ch, level, fine_px, candidates=list(SAMPLES))[0]
 
 
 def _edge_free(data, F):
