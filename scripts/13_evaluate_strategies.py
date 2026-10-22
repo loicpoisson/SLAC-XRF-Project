@@ -56,6 +56,7 @@ from utils.evaluation import (budget_dwell, sqrt_weight, coarse_to_fine_scale,
                               sqrt_errors, top_share)
 from utils.reconstruction import (coarse_rate, fill_bilinear, fill_harmonic,
                                   fill_kriging, calibrate_scale)
+from utils.line_scan import raster_line_time, fit_to_budget
 from utils.paths import PROJECT_ROOT, DATA_DIR
 
 SAMPLES = {"UA1_P1": 25, "UB1_P1": 25, "FP1_P1": 50}   # finest full scan per sample
@@ -81,6 +82,14 @@ def parse_args():
                         "over bilinear on UB1 Cu)")
     p.add_argument("--floors", nargs="+", type=float, default=[1.0, 2.0, 3.0],
                    help="--step2: dwell floor [ms] outside the ROIs")
+    p.add_argument("--time-model", choices=["pixels", "lines"], default="pixels",
+                   help="'pixels': total time = sum of dwells (steps 1-2). "
+                        "'lines': unidirectional line scans with acceleration "
+                        "ramps, gap crossings and row moves, for the raster and "
+                        "every strategy alike; dwells are renormalised so the "
+                        "line-scan totals are equal (step 3)")
+    p.add_argument("--jobs", type=int, default=6,
+                   help="cases evaluated in parallel (processes)")
     p.add_argument("--out", default=None,
                    help="CSV path (default outputs/evaluation_step1.csv, or "
                         "outputs/evaluation_step2.csv with --step2)")
@@ -217,6 +226,20 @@ def evaluate(sample, target, args):
         print(f"    B registered to A: x-shift {shifts.min()}..{shifts.max()} px")
 
     n_cell100 = int(round((100 / fine_px) ** 2))
+    if args.time_model == "lines":
+        lt = {k: raster_line_time(maps[k].shape, data[k]["xdata"], data[k]["ydata"],
+                                  dwell[k]) for k in ("c250", "c100")}
+        T_lines = raster_line_time(maps["A"].shape, F["xdata"], F["ydata"], T_REF)
+        spent_l = {250: lt["c250"], 100: lt["c250"] + lt["c100"]}
+
+    def to_time_model(d, lv):
+        """Equal-time renormalisation under the line-scan model (or no-op).
+        Returns the dwell actually OBTAINED (ramps can add dwell, and that
+        time is paid in the budget, so it must also be scored)."""
+        if args.time_model != "lines":
+            return d
+        _, plan = fit_to_budget(d, T_lines - spent_l[lv], F["xdata"], F["ydata"])
+        return plan["dwell_ms"]
     rows = []
     for tname, r_hat, t_truth, valid, other, spot_valid in truths:
         var_hat = np.maximum(r_hat, 0.0) / t_truth
@@ -230,7 +253,8 @@ def evaluate(sample, target, args):
         rows.append(_row(sample, target, tname, "raster", full, valid, 1.0, (1.0, 1.0),
                          1.0, top_share(e_ras, valid), base, n_spots))
         for name, (mask, lv) in strategies.items():
-            d = budget_dwell(sqrt_weight(est[lv], mask), mask, T - spent[lv])
+            d = to_time_model(budget_dwell(sqrt_weight(est[lv], mask), mask,
+                                           T - spent[lv]), lv)
             if name.endswith("resbound"):
                 # block mean of the truth: assumes each coarse cell integrated
                 # its whole area, which these scans do not (review F2)
@@ -259,11 +283,12 @@ def evaluate(sample, target, args):
                 in_budget = budget - floor * n_out
                 assert in_budget >= 1.0 * roi.sum(), "floor leaves no ROI budget"
                 d = budget_dwell(sqrt_weight(est[lv], roi), roi, in_budget)
-                d = np.where(roi, d, floor)
+                d = to_time_model(np.where(roi, d, floor), lv)
                 mask, pred = full, est[lv]
             else:
                 mask = roi
-                d = budget_dwell(sqrt_weight(est[lv], mask), mask, budget)
+                d = to_time_model(budget_dwell(sqrt_weight(est[lv], mask), mask,
+                                               budget), lv)
                 # one simulated acquisition of the ROI feeds the reconstruction
                 meas = np.where(mask, rng.poisson(np.maximum(meas_src, 0) * d)
                                 / np.maximum(d, 1e-9), 0.0)
@@ -301,15 +326,24 @@ def _row(sample, target, truth, name, mask, valid, ratio, ci, sq_ratio, top1,
             "ci_lo": ci[0], "ci_hi": ci[1], "sqrt_ratio": sq_ratio,
             "top1pct_share": top1, "quant_err": task["quant_err"],
             "recall": task["recall"], "precision": task["precision"],
+            "recall_skipped": task["recall_skipped"],
             "mc_rel_std": task["mse_mc_std"] / task["mse_mc_mean"]
             if task["mse_mc_mean"] else np.nan, "n_spots": n_spots}
 
 
 def main():
     args = parse_args()
+    cases = [(s, t) for s in args.samples for t in args.targets]
     rows = []
-    for s in args.samples:
-        for t in args.targets:
+    if args.jobs > 1 and len(cases) > 1:
+        from concurrent.futures import ProcessPoolExecutor
+        with ProcessPoolExecutor(max_workers=min(args.jobs, len(cases))) as ex:
+            futs = [ex.submit(evaluate, s, t, args) for s, t in cases]
+            for (s, t), f in zip(cases, futs):
+                rows += f.result()
+                print(f"  {s} {t} done", flush=True)
+    else:
+        for s, t in cases:
             print(f"  {s} {t} ...", flush=True)
             rows += evaluate(s, t, args)
     hdr = (f"{'sample':7} {'target':9} {'tr':2} {'strategy':20} {'area':>5} "
@@ -321,8 +355,10 @@ def main():
               f"{r['area']:5.0%} {r['mse_ratio']:6.2f} [{r['ci_lo']:5.2f},{r['ci_hi']:5.2f}] "
               f"{r['sqrt_ratio']:5.2f} {r['top1pct_share']:5.0%} "
               f"{r['quant_err']:6.1%} {r['recall']:6.0%} {r['precision']:5.0%}")
-    out = Path(args.out or PROJECT_ROOT / "outputs" /
-               ("evaluation_step2.csv" if args.step2 else "evaluation_step1.csv"))
+    name = "evaluation_step2.csv" if args.step2 else "evaluation_step1.csv"
+    if args.time_model == "lines":
+        name = name.replace(".csv", "_lines.csv")
+    out = Path(args.out or PROJECT_ROOT / "outputs" / name)
     out.parent.mkdir(exist_ok=True)
     with open(out, "w", newline="") as f:
         w = csv.DictWriter(f, fieldnames=list(rows[0]))

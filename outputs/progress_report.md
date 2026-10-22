@@ -668,4 +668,73 @@ script 13 for the reference numbers). Open items: emit per-line variable-dwell
 scans (the scanner can do it, Boltz et al. 2026) instead of uniform-dwell
 rectangles; confirm Q7/Q8 with Sam; more samples.
 
-*End of report (v5).*
+
+## 16. Step 3 — per-line variable-dwell scans, and a correction (2026-10)
+
+### 16.1 Correction to §15 (detection)
+§15 said the harmonic fill "restores" hot-spot recall. **That was a metric
+artefact.** Hot spots were re-detected on every reconstructed map with that
+map's own median + k·MAD threshold, so changing the fill moved the threshold:
+more detections in the *scanned* area, recall up, precision down (UA1 Mn
+precision 69 → 43 %). Detection now uses the **truth's** threshold for every
+strategy, and a new column `recall_skipped` counts the true hot spots lying
+entirely outside the scanned area that the fill re-detects: it is **0 %** for
+every reconstruction. A fill cannot find a particle the coarse scan did not
+see (§14.3-5). The harmonic fill still improves the Poisson MSE of the skipped
+area; detection depends only on what is scanned — i.e. on the ROI rule.
+
+### 16.2 Line-scan model (`scripts/utils/line_scan.py`)
+As run by Boltz et al. on SSRL 7-2: unidirectional rows, per-pixel dwell, stage
+speed planned at pixel boundaries with |Δu²| ≤ 2·a·px (constant acceleration
+inside a pixel, a_max = 500 mm/s², v_max = 200 mm/s), skipped pixels crossed as
+fast as the kinematics allow, row-to-row moves, and the dwell renormalised so
+the total — ramps, gap crossings, moves and the earlier 250 / 100 µm levels —
+equals a raster timed **with the same model**. Reviewed adversarially (ramp
+time now exact; obtained dwell scored; unreachable budgets flagged; earlier
+levels timed as lines).
+
+- `10_run_pipeline.py` writes `<stem>_line_plan.npz` for the next level
+  (per-row start/stop, requested and obtained dwell, time over every flown pixel,
+  stage speed) next to the rectangle `.dpm` fallback, and reports its time.
+- On UB1 Cu, the rectangles cost 2.9× the raster time (speedup 0.35×); the line
+  plan holds exactly the raster time. Its overheads: row moves 348 s, **gap
+  crossings 1143 s (14 % of the budget)**, ramp extra dwell 1.5 %.
+
+### 16.3 Results at equal REAL time (`13_evaluate_strategies.py --step2 --time-model lines`)
+Truth B for UA1/UB1, A for FP1; recall at the truth's threshold.
+
+| sample | element | **ROI k = 0.5** + harmonic: MSE ratio [95 % CI] | recall raster → this | ROI k = 1 + harmonic: MSE ratio | recall |
+|---|---|---|---|---|---|
+| FP1 | Cu | **0.79** [0.77, 0.83] | 90 → 89 % | 1.05 | 87 % |
+| UA1 | Cu | **1.25** [1.23, 1.27] | 96 → 93 % | 1.96 | 87 % |
+| UB1 | Cu | **1.42** [1.37, 1.46] | 97 → 94 % | 2.53 | 86 % |
+| FP1 | Fe | **1.27** [1.07, 1.44] | 99 → 99 % | 1.16 | 99 % |
+| UA1 | Fe | **1.08** [0.96, 1.18] | 99 → 97 % | 0.84 | 95 % |
+| UB1 | Fe | **1.50** [1.42, 1.59] | 99 → 97 % | 1.44 | 94 % |
+| FP1 | Mn | **1.58** [1.26, 1.88] | 96 → 96 % | 1.73 | 96 % |
+| UA1 | Mn | **1.09** [1.05, 1.13] | 95 → 95 % | 1.76 | 86 % |
+| UB1 | Mn | **1.09** [1.08, 1.11] | 96 → 94 % | 2.23 | 80 % |
+| FP1 | Zn | **0.82** [0.79, 0.86] | 92 → 92 % | 0.93 | 92 % |
+| UA1 | Zn | **1.30** [1.23, 1.37] | 98 → 97 % | 1.28 | 96 % |
+| UB1 | Zn | **1.55** [1.49, 1.62] | 98 → 94 % | 1.66 | 90 % |
+
+- **k = 0.5** (now the pipeline default): Poisson MSE > 1 in 10/12 cases (9 with
+  a 95 % interval above 1, 1.08–1.58×) while losing **at most 3 points** of
+  hot-spot recall (median 1).
+- **k = 1**: larger MSE gains (up to 2.53×) but up to **16 points** of recall
+  lost on Mn / Cu (median 5).
+- The line model costs 10–20 % of the pixel-model gain (gap crossings and
+  moves), e.g. UB1 Cu k = 1: 2.97× → 2.53×.
+- FP1 (50 µm fine scan) is the weak case: Cu and Zn lose at k = 0.5; with a
+  ×2 resolution step the 100 µm detection gains little over a raster.
+- Full-frame √ dwell (no area skipped) is ≈ raster (6/12 > 1).
+- Fe on UA1 remains the exception at k = 1 (0.84×); it wins slightly at k = 0.5.
+
+### 16.4 Questions for Sam (added)
+9. **Measure during gap crossings?** In a line scan the stage flies over the
+   skipped pixels (14 % of the time on UB1 Cu). If the detector keeps counting,
+   those pixels get short exposures for free — would the dataserver record them?
+10. **Line-plan format.** We export per-row per-pixel dwell (`.npz`); what does
+    the 7-2 dataserver need to execute it (the format used for Boltz et al.)?
+
+*End of report (v6).*

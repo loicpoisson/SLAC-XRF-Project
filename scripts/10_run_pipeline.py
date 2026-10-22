@@ -63,6 +63,8 @@ from utils.quality import poisson_mse, poisson_mse_montecarlo, mean_snr
 from utils.plotting import save_and_show
 from utils.smak_export import write_smak_regions
 from utils.reconstruction import calibrate_scale, reconstruct
+from utils.line_scan import (plan_lines, raster_line_time, fit_to_budget,
+                             export_line_plan)
 from utils.paths import (find_coarse, require, sample_hint_from_path,
                          PROJECT_ROOT, DATA_DIR)
 
@@ -97,8 +99,11 @@ def parse_args():
                    help="Single target element (e.g. Fe.Ka): footprint = that "
                         "element's hot spots, ladder coarse -> detect -> fine "
                         "(see utils.strategy.choose_element_strategy)")
-    p.add_argument("--roi-k", default=1.0, type=float,
-                   help="--target: MAD multiplier of the element ROI threshold")
+    p.add_argument("--roi-k", default=0.5, type=float,
+                   help="--target: MAD multiplier of the element ROI threshold. "
+                        "0.5 (default) keeps hot-spot recall within ~3 points "
+                        "of a raster; 1.0 maximises Poisson MSE but misses up "
+                        "to 16 %% of the weak-element hot spots (report sec. 16)")
     p.add_argument("--max-detect-ratio", default=MAX_DETECT_RATIO, type=float,
                    help="--target: skip area only when the detection pixel is "
                         "<= this many times the final pixel (default 4)")
@@ -324,6 +329,32 @@ def match_budget(dwell_map, mask_eff, grid, next_px_mm, fine_dwell,
     return dwell_map
 
 
+def line_scan_plan(grid, mask, dwell_map, next_px_mm, args, spent_ms=0.0):
+    """Per-line variable-dwell plan for the NEXT level (utils.line_scan).
+
+    The dwell map lives on the current grid; it is resampled (nearest) onto the
+    next level's pixel grid, then - unless --no-match-budget - renormalised so
+    the line-scan total (ramps, gap crossings, row moves) plus the earlier
+    levels equals a raster of the next level timed with the same model.
+    Returns (fine_x, fine_y, requested_dwell, plan, raster_ms).
+    """
+    x, y = np.asarray(grid["xdata"]), np.asarray(grid["ydata"])
+    nx = int(round(abs(x.max() - x.min()) / next_px_mm)) + 1
+    ny = int(round(abs(y.max() - y.min()) / next_px_mm)) + 1
+    xf = x.min() + np.arange(nx) * next_px_mm
+    yf = y.min() + np.arange(ny) * next_px_mm
+    m = project_mask(mask, x, y, xf, yf)
+    d = project_mask(np.where(mask, dwell_map, 0.0), x, y, xf, yf)
+    d = np.where(m, d, 0.0)
+    raster_ms = raster_line_time((ny, nx), xf, yf, args.fine_dwell)
+    if args.no_match_budget:
+        plan = plan_lines(d, xf, yf)
+    else:
+        d, plan = fit_to_budget(d, raster_ms - spent_ms, xf, yf,
+                                lo=args.dwell_low, hi=args.dwell_high)
+    return xf, yf, d, plan, raster_ms
+
+
 def _json_safe(obj):
     """Recursively convert numpy types to JSON; non-finite floats -> null
     (json.dump would otherwise write Infinity/NaN, which is not valid JSON)."""
@@ -344,7 +375,7 @@ def _json_safe(obj):
 
 def emit_outputs(stem, comp, grid, mask, dwell_map, plan, strat, desc,
                  next_px_mm, args, ground_truth_comp=None, per_level_stats=None,
-                 coarse_fill=None, spent_ms=0.0):
+                 coarse_fill=None, spent_ms=0.0, spent_line_ms=None):
     """Print the report, save JSON + SMAK .dpm regions + figure for one step.
     Returns the summary dict (so callers can log a cascade manifest)."""
     # Time estimate = pixel dwell time + inter-region travel/setup overhead.
@@ -438,6 +469,42 @@ def emit_outputs(stem, comp, grid, mask, dwell_map, plan, strat, desc,
                            for st in (per_level_stats or [])] or None,
         "regions": plan,
     }
+    # Per-line variable-dwell plan: what the 7-2 scanner can execute
+    # (Boltz et al. 2026); the rectangles above are the fallback.
+    spent_line = spent_ms if spent_line_ms is None else spent_line_ms
+    xf, yf, d_line, lplan, ras_line = line_scan_plan(grid, mask, dwell_map,
+                                                     next_px_mm, args, spent_line)
+    scanned_f = lplan["dwell_ms"] > 0
+    mean_dwell = float(lplan["dwell_ms"][scanned_f].mean()) if scanned_f.any() else 0.0
+    line_total_s = (lplan["total_ms"] + spent_line) / 1000.0
+    print(f"\n  === LINE-SCAN PLAN (variable dwell per pixel, ramps included) ===")
+    print(f"    Rows flown        : {int((lplan['x0'] >= 0).sum())} / {len(yf)}")
+    print(f"    Pixels measured   : {scanned_f.mean()*100:.1f}% of the frame, mean "
+          f"dwell {mean_dwell:.1f} ms (raster {args.fine_dwell:.0f} ms)")
+    print(f"    Time              : {lplan['total_ms']/1000:.0f} s + earlier levels "
+          f"{spent_line/1000:.0f} s = {line_total_s:.0f} s  (raster, same model: "
+          f"{ras_line/1000:.0f} s)")
+    print(f"      overheads       : row moves {lplan['move_ms']/1000:.0f} s, gap "
+          f"crossings {(lplan['crossing_ms'][~scanned_f].sum())/1000:.0f} s, "
+          f"ramp extra dwell {lplan['extra_dwell']*100:.1f}%")
+    if not lplan.get("converged", True):
+        print("    WARNING: the dwell bounds make the equal-time budget unreachable "
+              "(ROI too small or too large for [dwell-low, dwell-high]); the plan "
+              "takes the time printed above, not the raster time")
+    line_path = OUTPUT_DIR / f"{stem}_line_plan.npz"
+    export_line_plan(line_path, lplan, xf, yf, d_line,
+                     meta={"stem": stem, "px_mm": next_px_mm,
+                           "raster_ms": ras_line, "earlier_levels_ms": spent_line})
+    summary["estimate"].update({
+        "line_scan_total_s": line_total_s,
+        "line_scan_raster_s": ras_line / 1000.0,
+        "line_scan_budget_matched": bool(lplan.get("converged", True)),
+        "line_scan_measured_frac": float(scanned_f.mean()),
+        "line_scan_mean_dwell_ms": mean_dwell,
+        "line_scan_move_s": lplan["move_ms"] / 1000.0,
+        "line_scan_extra_dwell": lplan["extra_dwell"]})
+    print(f"  Line plan saved   -> {line_path}")
+
     json_path = OUTPUT_DIR / f"{stem}_scan_plan.json"
     with open(json_path, "w") as f:
         json.dump(_json_safe(summary), f, indent=2)
@@ -537,7 +604,7 @@ def _append_manifest(sample, idx, px_um, strat, summary, fresh=False):
 # ── modes ─────────────────────────────────────────────────────────────────────
 
 def plan_and_emit(dwell_signal, comp, grid, mask, strat, desc, next_px, stem,
-                  args, spent_ms=0.0, **gt_kwargs):
+                  args, spent_ms=0.0, spent_line_ms=None, **gt_kwargs):
     """
     Shared planning tail for BOTH modes: dwell map -> optional budget match ->
     scan plan -> outputs. Keeping this in one place guarantees the offline
@@ -557,7 +624,8 @@ def plan_and_emit(dwell_signal, comp, grid, mask, strat, desc, next_px, stem,
                            setup_ms=args.setup_ms, margin_fine=args.margin_fine,
                            fine_dwell=args.fine_dwell)
     return emit_outputs(stem, comp, grid, mask_eff, dwell_map, plan, strat,
-                        desc, next_px, args, spent_ms=spent_ms, **gt_kwargs)
+                        desc, next_px, args, spent_ms=spent_ms,
+                        spent_line_ms=spent_line_ms, **gt_kwargs)
 
 
 def coarse_scale_for(args, sample, channels, coarse_px, fine_px):
@@ -646,6 +714,10 @@ def run_simulate_target(args, sample):
         mask = np.ones_like(fine["comp"], dtype=bool)
     # intermediate levels are full frames in this mode
     spent = sum(level_time_ms(lv["data"]) for lv in levels[:-1])
+    spent_line = sum(raster_line_time(lv["comp"].shape, lv["data"]["xdata"],
+                                      lv["data"]["ydata"],
+                                      dwell_ms_from_path(lv["data"]["filepath"]))
+                     for lv in levels[:-1])
     dwell_signal = project_coarse_to_fine(prev["comp"], prev["data"], fine["data"])
     # Unscanned fine pixels: graph-harmonic interpolation of the last
     # full-frame level (a measured scan - never the fine truth).
@@ -657,7 +729,8 @@ def run_simulate_target(args, sample):
     stem = f"{sample}_{args.target}_simulate"
     plan_and_emit(dwell_signal, fine["comp"], fine["data"], mask, strat, desc,
                   fine["data"]["dx"], stem, args,
-                  spent_ms=spent, ground_truth_comp=fine["comp"],
+                  spent_ms=spent, spent_line_ms=spent_line,
+                  ground_truth_comp=fine["comp"],
                   coarse_fill=coarse_fill)
     save_reconstruction(stem, recon, mask, fine["data"], args)
 
@@ -786,6 +859,7 @@ def run_step(args):
         desc, strat = state["desc"], state["strategy"]
         sample = state["sample"]
         spent = state.get("spent_ms", 0.0)
+        spent_line = state.get("spent_line_ms", spent)
         cur_px = px_um_of(data)
         # Guard: the acquired scan must match the level this step expects, else the
         # cascade silently mis-steps (project a mask onto the wrong grid).
@@ -815,6 +889,8 @@ def run_step(args):
             channels = [args.target]
         comp, used, _ = get_composite_map(data, channels)
         spent = level_time_ms(data)
+        spent_line = raster_line_time(comp.shape, data["xdata"], data["ydata"],
+                                      dwell_ms_from_path(data["filepath"]))
         sample = args.sample or sample_hint_from_path(coarse_path) or Path(coarse_path).stem
         cur_px = px_um_of(data)
         ladder = resolve_ladder(args, sample, cur_px)
@@ -859,7 +935,8 @@ def run_step(args):
     # then do the earlier acquisitions count against it.
     plans_final = idx + 2 == len(ladder)
     summary = plan_and_emit(comp, comp, data, mask, strat, desc, next_px,
-                            stem, args, spent_ms=spent if plans_final else 0.0)
+                            stem, args, spent_ms=spent if plans_final else 0.0,
+                            spent_line_ms=spent_line if plans_final else 0.0)
     _append_manifest(sample, idx, cur_px, strat, summary, fresh=not args.resume)
 
     # Persist state so the next acquired level can resume this cascade.
@@ -873,6 +950,10 @@ def run_step(args):
             "comp": comp, "px": cur_px, "dwell_ms": dwell_ms_from_path(data["filepath"]),
             # acquired so far + the level this plan is about to acquire
             "spent_ms": spent + summary["estimate"]["level_time_s"] * 1000.0,
+            # same, timed as line scans (the next level is flown as lines)
+            "spent_line_ms": spent_line
+            + summary["estimate"]["line_scan_total_s"] * 1000.0
+            - (spent_line if plans_final else 0.0),
         })
         state_path = OUTPUT_DIR / f"{sample}_cascade_state.pkl"
         OUTPUT_DIR.mkdir(exist_ok=True)

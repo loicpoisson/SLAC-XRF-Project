@@ -107,11 +107,19 @@ def block_bootstrap_ratio(err_raster, err_adapt, valid, block=40, n_boot=300,
 
 # ── hot spots: quantification + detection ──────────────────────────────────────
 
-def hot_spots(rate_map, valid, k=3.0, smooth=3, min_px=4):
-    """Labelled hot spots: MAD threshold on a smoothed map, inside `valid`."""
+def spot_threshold(rate_map, valid, k=3.0, smooth=3):
+    """MAD threshold (median + k MAD) of the smoothed map inside `valid`."""
     sm = ndimage.uniform_filter(rate_map, smooth)
-    m, _, _ = threshold_map(sm, method="mad", k=k, mask=valid)
-    m &= valid
+    return float(threshold_map(sm, method="mad", k=k, mask=valid)[1])
+
+
+def hot_spots(rate_map, valid, k=3.0, smooth=3, min_px=4, thresh=None):
+    """Labelled hot spots on a smoothed map, inside `valid`: above `thresh`,
+    or above the map's own MAD threshold when `thresh` is None."""
+    sm = ndimage.uniform_filter(rate_map, smooth)
+    if thresh is None:
+        thresh = spot_threshold(rate_map, valid, k, smooth)
+    m = (sm > thresh) & valid
     lab, n = ndimage.label(m)
     if n:
         sizes = np.bincount(lab.ravel())
@@ -133,9 +141,12 @@ def _quant_error(rec, truth, lab, n):
     return float(np.median(np.abs(s_rec[ok] - s_tru[ok]) / s_tru[ok])) if ok.any() else np.nan
 
 
-def _detection(rec, lab_true, n_true, valid, k):
-    """Recall / precision of hot spots re-detected on a reconstructed map."""
-    lab_rec, n_rec = hot_spots(rec, valid, k=k)
+def _detection(rec, lab_true, n_true, valid, thresh):
+    """Recall / precision of hot spots re-detected on a reconstructed map at
+    the TRUTH's threshold. (Re-thresholding every reconstruction on its own
+    MAD moved the threshold with the fill and inflated recall at the cost of
+    precision - a metric artefact, not recovered spots.)"""
+    lab_rec, n_rec = hot_spots(rec, valid, thresh=thresh)
     if n_true == 0:
         return np.nan, np.nan
     hit_true = np.unique(lab_true[(lab_true > 0) & (lab_rec > 0)])
@@ -147,23 +158,38 @@ def _detection(rec, lab_true, n_true, valid, k):
 
 
 def simulate_tasks(truth_rate, dwell, mask, pred_rate, valid, lab, n_spots,
-                   k=3.0, n_draws=10, seed=0):
+                   k=3.0, n_draws=10, seed=0, thresh=None):
     """Monte-Carlo: draw counts N ~ Poisson(r t) on scanned pixels, fill the
     rest with pred, then score quantification and detection on the result.
     Also returns the spread of the realised MSE (photon-noise error bar)."""
     rng = np.random.default_rng(seed)
     r = np.maximum(truth_rate, 0.0)
     t = np.maximum(dwell, 1e-9)
-    q, rec_, prec_, mse = [], [], [], []
+    if thresh is None:
+        thresh = spot_threshold(r, valid, k)
+    # true spots lying ENTIRELY outside the scanned area, with a margin equal
+    # to the smoothing radius so that no measured pixel enters their window:
+    # can the fill alone find them?
+    skipped = np.zeros(n_spots + 1, bool)
+    if n_spots and not mask.all():
+        near = ndimage.binary_dilation(mask, iterations=1)
+        frac = ndimage.mean((~near).astype(float), lab, np.arange(1, n_spots + 1))
+        skipped[1:] = np.asarray(frac) >= 1.0
+    q, rec_, prec_, mse, rsk = [], [], [], [], []
     for _ in range(n_draws):
         N = rng.poisson(np.where(mask, r * t, 0.0))
         rec = np.where(mask, N / t, pred_rate)
         q.append(_quant_error(rec, r, lab, n_spots))
-        a, b = _detection(rec, lab, n_spots, valid, k)
+        a, b = _detection(rec, lab, n_spots, valid, thresh)
         rec_.append(a); prec_.append(b)
+        if skipped.any():
+            lab_rec, _ = hot_spots(rec, valid, thresh=thresh)
+            hit = np.unique(lab[(lab > 0) & (lab_rec > 0)])
+            rsk.append(float(skipped[hit].sum() / skipped.sum()))
         mse.append(float(np.mean(((rec - r) ** 2)[valid])))
     return {"quant_err": float(np.nanmean(q)), "recall": float(np.nanmean(rec_)),
             "precision": float(np.nanmean(prec_)),
+            "recall_skipped": float(np.mean(rsk)) if rsk else np.nan,
             "mse_mc_mean": float(np.mean(mse)), "mse_mc_std": float(np.std(mse))}
 
 
