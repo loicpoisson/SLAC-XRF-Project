@@ -145,6 +145,13 @@ def threshold_map(channel_map, method="auto", k=2.0, mask=None):
     return roi_mask, thresh, method_used
 
 
+def element_roi_mask(channel_map, k=1.0):
+    """Hot spots of a single element: MAD threshold + 1-pixel safety ring.
+    Used by script 10 (--target) and utils.evaluation."""
+    m, _, _ = threshold_map(channel_map, method="mad", k=k)
+    return ndimage.binary_dilation(m)
+
+
 def _sample_threshold(values, mode="otsu_lower", level=50.0):
     """Core threshold-only helper used by sample_mask. Returns the scalar threshold."""
     x = np.asarray(values).ravel().astype(float)

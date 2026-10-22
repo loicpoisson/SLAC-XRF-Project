@@ -66,6 +66,11 @@ MSE ratios are at equal total time, including the earlier levels (see §13 of
 the progress report: element targeting wins 1.1-1.5x in 8/9 cases, the
 composite cascade does not).
 
+### Robust comparison of strategies (independent truth, real coarse fill)
+```bash
+python scripts/13_evaluate_strategies.py      # -> outputs/evaluation_step1.csv, see report section 14
+```
+
 ### Profile samples by sparsity (where does adaptive help?)
 ```bash
 python scripts/11_profile_samples.py                 # per-sample (composite)
@@ -74,7 +79,7 @@ python scripts/11_profile_samples.py --per-element   # per element channel
 
 ### Tests
 ```bash
-python -m pytest tests/ -q        # 71 tests (quality, dwell, roi, cascade, strategy, loader, SMAK export)
+python -m pytest tests/ -q        # 81 tests
 ```
 
 ## Repo layout
@@ -119,7 +124,7 @@ SLAC-XRF-Project/
   equal-time-quality strategy is inspired by this work.
 
 ## Status
-- Phase 1 pipeline: complete, iterative, tested (71 tests), validated on UA1 / UB1 / FP1.
+- Phase 1 pipeline: complete, iterative, tested (81 tests), validated on UA1 / UB1 / FP1.
 - Honest scope: spatial speedup needs **sparse** targets → demonstrated per-element,
   not on the dense composite; temporal `sqrt` improves MSE at equal time on dense samples.
 - Open questions for the beamline (see report §10): per-pixel dwell map vs uniform-dwell

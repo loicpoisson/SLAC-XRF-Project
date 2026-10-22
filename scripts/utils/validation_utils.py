@@ -20,7 +20,12 @@ def _nearest_idx(arr, vals):
     arr_s = arr[order]
     pos   = np.clip(np.searchsorted(arr_s, vals), 0, len(arr_s) - 1)
     left  = np.clip(pos - 1, 0, len(arr_s) - 1)
-    choose_left = np.abs(arr_s[left] - vals) < np.abs(arr_s[pos] - vals)
+    # Fine pixel centres often sit exactly on a coarse cell edge (100->25,
+    # 50->25): break those ties consistently to the right, otherwise float
+    # noise assigns them at random and cells get 1..9 fine pixels instead of 4.
+    step = np.median(np.diff(arr_s)) if len(arr_s) > 1 else 1.0
+    choose_left = (np.abs(arr_s[left] - vals)
+                   < np.abs(arr_s[pos] - vals) - 1e-6 * abs(step))
     return order[np.where(choose_left, left, pos)]
 
 

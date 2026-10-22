@@ -513,4 +513,86 @@ the beamline therefore depends on question 1 below.**
    dwell map with a leave-one-sample-out split (see `phase2_ml/README.md`);
    the question is whether it beats the coarse `sqrt` heuristic.
 
-*End of report (v3).*
+
+## 14. Step-1 robust evaluation (2026-10, `scripts/13_evaluate_strategies.py`)
+
+### 14.1 Protocol (what changed vs §13)
+- **Decisions** (ROI mask, dwell) use only the measured 250 / 100 µm scans.
+- **Fill** of unscanned fine pixels = the measured coarse scan, rescaled by a
+  factor calibrated on the *other* samples (leave-one-sample-out). §13 used the
+  block mean of the fine truth, which leaks the answer.
+- **Truth** = a fine scan that played no part in the decisions: the 10 ms scan
+  (A) and, for UA1/UB1, the independent 25 ms scan (B), registered to A
+  (fly-scan drift of −3…+5 fine px) and brought to A's flux scale; its own
+  Poisson noise is removed without bias.
+- **Budget** exact (dwell scaled + clipped until it spends the fine raster time
+  minus the 250 / 100 µm scans, full frames charged).
+- **Criteria**: Poisson MSE ratio with block-bootstrap 95 % CI; the same ratio on
+  √rate (every pixel weighs alike); hot-spot quantification error; hot-spot
+  detection recall / precision, with hot spots counted only when present in
+  both independent scans. Fly-scan edge columns excluded.
+- The protocol was reviewed adversarially; its 8 findings were fixed (or are
+  documented: proportional calibration, full 100 µm frame charged).
+
+### 14.2 Results (truth B for UA1/UB1, A for FP1; full table: `outputs/evaluation_step1.csv`)
+
+`roi100` = element ROIs on the 100 µm scan + √ dwell (= `10_run_pipeline --target`).
+
+| sample | element | Poisson-MSE ratio [95 % CI] | √-domain ratio | recall raster → roi100 | quant. error raster → roi100 |
+|---|---|---|---|---|---|
+| UA1 | Fe | **0.87** [0.77, 0.98] | 0.71 | 98 → 97 % | 2.5 → 2.2 % |
+| UB1 | Fe | **1.46** [1.37, 1.57] | 1.00 | 97 → 90 % | 3.0 → 2.6 % |
+| FP1 | Fe | **1.43** [1.20, 1.65] | 0.57 | 99 → 100 % | 1.0 → 0.9 % |
+| UA1 | Zn | **1.35** [1.26, 1.44] | 0.94 | 97 → 96 % | 3.5 → 2.9 % |
+| UB1 | Zn | **1.67** [1.58, 1.77] | 1.06 | 90 → 83 % | 4.2 → 3.9 % |
+| FP1 | Zn | **1.11** [1.06, 1.15] | 0.80 | 85 → 84 % | 5.0 → 4.5 % |
+| UA1 | Mn | **1.76** [1.70, 1.83] | 1.14 | 84 → 78 % | 8.7 → 8.5 % |
+| UB1 | Mn | **1.96** [1.93, 1.99] | 1.14 | 86 → **71 %** | 10.1 → 10.1 % |
+| FP1 | Mn | **2.10** [1.66, 2.52] | 0.75 | 95 → 96 % | 3.5 → 2.8 % |
+| UA1 | Cu | **1.87** [1.83, 1.92] | 1.16 | 88 → **70 %** | 7.4 → 5.9 % |
+| UB1 | Cu | **2.06** [1.97, 2.16] | 1.14 | 86 → **69 %** | 7.1 → 6.7 % |
+| FP1 | Cu | **1.25** [1.20, 1.31] | 0.87 | 80 → 83 % | 6.7 → 6.1 % |
+| all | composite | 0.57 – 1.14 | 0.60 – 1.02 | — | — |
+
+### 14.3 What this establishes
+1. **The Poisson-MSE gain of element targeting is real** — 11 / 12
+   element × sample cases are > 1 with a 95 % interval excluding 1 (1.11–2.10×),
+   now with an independent truth and a measured (not oracle) fill. The
+   exception is Fe on UA1 (0.87×). Targeting the composite does not pay.
+2. **Quantification of the hot spots that are scanned improves or holds**
+   in every case (e.g. Cu 7.4 → 5.9 %).
+3. **But weak elements lose hot spots.** For Mn / Cu on UA1 / UB1, recall
+   drops by 6–18 points (84–88 % → 69–78 %): real hot spots fall outside the
+   ROIs found at 100 µm. The Poisson MSE hides it because it is dominated by
+   bright pixels (the worst 1 % of pixels carry 13–46 % of `roi100`'s error).
+4. **The verdict depends on the criterion.** On √rate the optimum is a uniform
+   dwell, so full-frame √ allocation scores 0.67–0.92× there, and `roi100` is
+   0.57–1.16×. Which criterion matters is a science question (§14.4).
+5. **ROIs from 250 µm always lose**, and the review found why: the coarse
+   scans do not integrate their whole cell. Bright particles a few fine pixels
+   away from a 250 µm sample point leave 1–5 counts in that cell. The missing
+   information is a property of the acquisition, not of the algorithm.
+6. **Full-frame √ dwell** (no area skipped) is inconsistent: 1.20–1.44× for
+   Fe/Zn on UA1/UB1 and Fe/Mn on FP1, but 0.76–1.01× for Mn/Cu on UA1/UB1 and
+   Zn/Cu on FP1 — the 100 µm estimate of weaker channels is too noisy to steer
+   the dwell, and the 100 µm scan costs 7 % of the budget.
+7. The "resolution bound" (unscanned pixels filled by the truth's block mean)
+   brings recall back to 92–96 %: better *sampling between* coarse points, not a
+   smarter fill of the same data, is what would recover the missed spots.
+
+### 14.4 New questions for Sam
+7. **Coarse-scan footprint.** At 250 / 100 µm steps, does the beam (or the
+   fly-scan integration) cover the whole cell, or only a line / spot? A
+   defocused beam or vertical oversampling at the coarse levels would make
+   ROI detection see every particle (finding 5).
+8. **Criterion.** For these samples, is it worse to mis-measure a bright
+   particle (Poisson MSE), to miss a faint one (recall), or to mis-quantify a
+   region? Element targeting wins on the first, loses on the second for Mn/Cu.
+
+### 14.5 Next (step 2)
+Reconstruction / sampling between coarse points: graph interpolation and a
+block-aware Gaussian process (see `Papers/reports/GNN pour imagerie XRF
+adaptative.md`), judged on recall as well as MSE; and a recall-aware ROI rule
+(e.g. lower MAD threshold or a small dwell floor outside ROIs for weak elements).
+
+*End of report (v4).*

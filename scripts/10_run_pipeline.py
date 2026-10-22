@@ -55,7 +55,7 @@ from utils.dwell import allocate_dwell
 from utils.cascade import (find_level_file, available_levels, refine_step,
                            refine_cascade, dwell_ms_from_path)
 from utils.roi_utils import (label_rois, get_bounding_boxes, group_rois, add_margin,
-                             threshold_map)
+                             element_roi_mask)
 from utils.validation_utils import (coarse_blockmean, project_coarse_to_fine,
                                     project_mask,
                                      travel_overhead_from_centers)
@@ -553,12 +553,6 @@ def plan_and_emit(dwell_signal, comp, grid, mask, strat, desc, next_px, stem,
                            fine_dwell=args.fine_dwell)
     return emit_outputs(stem, comp, grid, mask_eff, dwell_map, plan, strat,
                         desc, next_px, args, spent_ms=spent_ms, **gt_kwargs)
-
-
-def element_roi_mask(comp, k=1.0):
-    """Hot spots of a single element: MAD threshold + 1-pixel safety ring."""
-    m, _, _ = threshold_map(comp, method="mad", k=k)
-    return ndimage.binary_dilation(m)
 
 
 def element_ladder(levels, max_ratio=MAX_DETECT_RATIO):
