@@ -100,3 +100,13 @@ def test_top_share():
     from utils.evaluation import top_share
     e = np.ones(1000); e[0] = 1000.0
     assert top_share(e, np.ones(1000, bool), 0.001) == pytest.approx(1000 / 1999)
+
+
+def test_sqrt_poisson_var_exact_limits():
+    from utils.evaluation import sqrt_poisson_var
+    v = sqrt_poisson_var(np.array([0.0, 0.5, 1000.0]))
+    assert v[0] == 0.0 and v[2] == 0.25
+    # direct Monte-Carlo check at low counts, where 1/4 is wrong
+    n = np.random.default_rng(6).poisson(0.5, 2_000_000)
+    assert v[1] == pytest.approx(np.sqrt(n).var(), rel=0.01)
+    assert abs(v[1] - 0.25) > 0.05          # the 1/(4t) shortcut is off here

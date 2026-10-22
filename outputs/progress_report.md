@@ -595,4 +595,74 @@ block-aware Gaussian process (see `Papers/reports/GNN pour imagerie XRF
 adaptative.md`), judged on recall as well as MSE; and a recall-aware ROI rule
 (e.g. lower MAD threshold or a small dwell floor outside ROIs for weak elements).
 
-*End of report (v4).*
+
+## 15. Step 2 — reconstruction of the skipped pixels (2026-10)
+
+`scripts/13_evaluate_strategies.py --step2` (→ `outputs/evaluation_step2.csv`),
+same protocol as §14, plus `scripts/utils/reconstruction.py`. The simulated ROI
+acquisition that feeds a reconstruction is drawn from the *other* fine scan, so
+no fill ever sees the scanned values of the scan it is scored on. Reviewed
+adversarially; fixes: exact Poisson variance in the √ criterion, measurement
+drawn from the independent scan, CG convergence check, budget guard.
+
+### 15.1 What was tried
+| fill of the skipped pixels | idea |
+|---|---|
+| cell (step 1) | replicate each 100 µm value over its cell |
+| bilinear | interpolate between coarse points (they are point samples, §14) |
+| harmonic | graph-Laplacian interpolation (label propagation, CS224W) on the fine grid graph, anchored on coarse points **and** the fine ROI measurements |
+| **harmonic_c** | the same, anchored on the **coarse points only** |
+| kriging | residual kriging (`--kriging`); ~100 s per case, no gain, unstable covariance fit — dropped |
+
+ROI rules for weak elements: lower threshold (k = 0.5) and a dwell floor (1–3 ms)
+outside the ROIs (everything measured).
+
+### 15.2 Result: `roi100 + harmonic_c` (truth B for UA1/UB1, A for FP1)
+| sample | element | Poisson-MSE ratio [95 % CI] | √ ratio | recall raster → this (step-1 `roi100`) | quant. error raster → this |
+|---|---|---|---|---|---|
+| UA1 | Fe | 0.89 [0.78, 0.99] | 0.90 | 98 → 97 % (97) | 2.5 → 2.2 % |
+| UB1 | Fe | **1.57** [1.48, 1.68] | 1.74 | 97 → 95 % (90) | 3.0 → 2.6 % |
+| FP1 | Fe | **1.41** [1.17, 1.62] | 0.63 | 99 → 100 % (100) | 1.0 → 0.9 % |
+| UA1 | Zn | **1.40** [1.30, 1.49] | 1.39 | 97 → 97 % (96) | 3.5 → 2.9 % |
+| UB1 | Zn | **1.86** [1.75, 1.96] | 2.16 | 90 → 91 % (83) | 4.2 → 3.9 % |
+| FP1 | Zn | **1.16** [1.12, 1.21] | 1.02 | 85 → 86 % (84) | 5.0 → 4.5 % |
+| UA1 | Mn | **2.03** [1.96, 2.10] | 2.08 | 84 → 87 % (78) | 8.7 → 8.6 % |
+| UB1 | Mn | **2.62** [2.56, 2.68] | 2.50 | 86 → 81 % (71) | 10.1 → 10.3 % |
+| FP1 | Mn | **2.28** [1.84, 2.69] | 1.47 | 95 → 100 % (96) | 3.5 → 2.8 % |
+| UA1 | Cu | **2.28** [2.21, 2.36] | 2.77 | 88 → 91 % (70) | 7.4 → 5.9 % |
+| UB1 | Cu | **2.97** [2.80, 3.12] | 3.55 | 86 → 87 % (69) | 7.1 → 6.7 % |
+| FP1 | Cu | **1.42** [1.37, 1.49] | 1.41 | 80 → 91 % (83) | 6.7 → 6.1 % |
+
+**11 / 12 element cases beat the raster on Poisson MSE with a 95 % interval
+above 1 (1.16–2.97×), 11 / 12 keep hot-spot recall within 2 points of the raster
+or better, 10 / 12 also win on the √ criterion, and quantification improves in
+11 / 12.** The exception is again Fe on UA1. Compared with step 1, the gain comes
+from the fill alone (same scan plan, same time): the 15–18-point recall loss on
+Mn/Cu is gone (UB1 Mn keeps a 5-point loss).
+
+### 15.3 Lessons
+1. **Interpolate between coarse points, do not propagate the ROI measurements.**
+   Anchoring the interpolation on the fine measurements inside the ROIs pushes
+   the values of particles cut by the ROI border into the pixels just outside,
+   which are darker *by construction* (the ROI is a threshold): on FP1 Fe it
+   multiplied the error of the skipped pixels by ~10, and its score depended on
+   ~100 border pixels. With coarse anchors only the gain is stable everywhere.
+2. **A dwell floor outside the ROIs is a bad idea** (0.57–1.44×, recall down):
+   1–3 ms measurements of the background are noisier than the interpolated
+   100 µm scan, at a real time cost.
+3. **A lower ROI threshold** (k = 0.5) trades MSE for recall; with `harmonic_c`
+   the default k = 1 already restores recall, so k = 0.5 is not needed.
+4. **ROIs from 250 µm still lose** for most elements even with the better fill,
+   consistent with §14.3-5: the 250 µm points did not measure the particles.
+5. The composite still does not pay (0.59–1.23×).
+
+### 15.4 Recommended default (for the next beamline test)
+`--target <element>`: 250 µm → full 100 µm → 25 µm scan of the element's
+100 µm hot spots (MAD k = 1, 1-pixel ring) with √ dwell (reg 1), and the
+skipped pixels reconstructed by graph-harmonic interpolation of the 100 µm
+points. Open items: wire `fill_harmonic(..., w_fine=0)` into
+`10_run_pipeline.py` as the reconstruction it outputs (its `--simulate` MSE still
+uses the truth block mean, which §14 showed is optimistic); confirm Q7/Q8 with
+Sam; more samples.
+
+*End of report (v5).*

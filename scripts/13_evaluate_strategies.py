@@ -54,6 +54,8 @@ from utils.evaluation import (budget_dwell, sqrt_weight, coarse_to_fine_scale,
                               pixel_errors, raster_errors, block_bootstrap_ratio,
                               hot_spots, simulate_tasks, register_rows,
                               sqrt_errors, top_share)
+from utils.reconstruction import (coarse_rate, fill_bilinear, fill_harmonic,
+                                  fill_kriging)
 from utils.paths import PROJECT_ROOT, DATA_DIR
 
 SAMPLES = {"UA1_P1": 25, "UB1_P1": 25, "FP1_P1": 50}   # finest full scan per sample
@@ -70,7 +72,18 @@ def parse_args():
                    help="MAD multiplier defining true hot spots on the truth")
     p.add_argument("--draws", type=int, default=10, help="Monte-Carlo draws")
     p.add_argument("--boot", type=int, default=300, help="block-bootstrap resamples")
-    p.add_argument("--out", default=str(PROJECT_ROOT / "outputs" / "evaluation_step1.csv"))
+    p.add_argument("--step2", action="store_true",
+                   help="add step-2 strategies: reconstructions of the unscanned "
+                        "pixels (bilinear / harmonic / kriging) and recall-"
+                        "preserving ROI rules (dwell floor, lower threshold)")
+    p.add_argument("--kriging", action="store_true",
+                   help="--step2: also residual kriging (~100 s per case, no gain "
+                        "over bilinear on UB1 Cu)")
+    p.add_argument("--floors", nargs="+", type=float, default=[1.0, 2.0, 3.0],
+                   help="--step2: dwell floor [ms] outside the ROIs")
+    p.add_argument("--out", default=None,
+                   help="CSV path (default outputs/evaluation_step1.csv, or "
+                        "outputs/evaluation_step2.csv with --step2)")
     return p.parse_args()
 
 
@@ -162,11 +175,13 @@ def evaluate(sample, target, args):
     spent = {250: maps["c250"].size * dwell["c250"],
              100: maps["c250"].size * dwell["c250"] + maps["c100"].size * dwell["c100"]}
     edge_ok = _edge_free([data["c250"], data["c100"]], F)
-    est, fill = {}, {}
+    est, fill, crate, cvar = {}, {}, {}, {}
     for lv, key in ((250, "c250"), (100, "c100")):
-        on_fine = project_coarse_to_fine(_without_edges(maps[key]), data[key], F)
+        cmap = _without_edges(maps[key])
         s = calibration(sample, target, lv, fine_px)
-        est[lv] = on_fine * s / T_REF            # rate estimate on the fine grid
+        crate[lv] = coarse_rate(cmap, s, dwell[key])           # coarse grid
+        cvar[lv] = np.maximum(cmap, 0.0) * s ** 2 / dwell[key] ** 2
+        est[lv] = project_coarse_to_fine(crate[lv], data[key], F)
         fill[lv] = est[lv]
     full = np.ones(maps["A"].shape, bool)
 
@@ -176,6 +191,21 @@ def evaluate(sample, target, args):
         strategies[f"roi{lv}"] = (project_mask(m, data[key]["xdata"], data[key]["ydata"],
                                                F["xdata"], F["ydata"]), lv)
     strategies["roi100_resbound"] = strategies["roi100"]
+    # step 2: (mask, level, fill method, dwell floor outside the mask)
+    variants = {}
+    if args.step2:
+        for lv in (250, 100):
+            for meth in (("bilinear", "harmonic", "harmonic_c")
+                         + (("kriging",) if args.kriging else ())):
+                variants[f"roi{lv}+{meth}"] = (strategies[f"roi{lv}"][0], lv, meth, 0.0)
+        m05 = project_mask(element_roi_mask(_without_edges(maps["c100"]), 0.5),
+                           data["c100"]["xdata"], data["c100"]["ydata"],
+                           F["xdata"], F["ydata"])
+        variants["roi100_k0.5"] = (m05, 100, "cell", 0.0)
+        variants["roi100_k0.5+harmonic"] = (m05, 100, "harmonic", 0.0)
+        variants["roi100_k0.5+harmonic_c"] = (m05, 100, "harmonic_c", 0.0)
+        for fl in args.floors:
+            variants[f"roi100_floor{fl:g}"] = (strategies["roi100"][0], 100, None, fl)
 
     rA = maps["A"] / dwell["A"]
     valid_A = (maps["A"].sum(axis=1) > 0)[:, None] & edge_ok & full
@@ -228,6 +258,51 @@ def evaluate(sample, target, args):
                                   k=args.spot_k, n_draws=args.draws)
             rows.append(_row(sample, target, tname, name, mask, valid, ratio, ci,
                              sq_ratio, top_share(e_ad, valid), task, n_spots))
+        rng = np.random.default_rng(0)
+        # The simulated ROI acquisition that feeds the reconstruction is drawn
+        # from the OTHER fine scan where one exists, so the fill never sees the
+        # scanned values of the scored scan (step-2 review F1).
+        meas_src = r_hat if other is None else np.where(spot_valid, other, r_hat)
+        for name, (roi, lv, meth, floor) in variants.items():
+            budget = T - spent[lv]
+            if floor > 0:
+                # everything measured: floor outside the ROIs, sqrt inside
+                n_out = int((~roi).sum())
+                in_budget = budget - floor * n_out
+                assert in_budget >= 1.0 * roi.sum(), "floor leaves no ROI budget"
+                d = budget_dwell(sqrt_weight(est[lv], roi), roi, in_budget)
+                d = np.where(roi, d, floor)
+                mask, pred = full, est[lv]
+            else:
+                mask = roi
+                d = budget_dwell(sqrt_weight(est[lv], mask), mask, budget)
+                # one simulated acquisition of the ROI feeds the reconstruction
+                meas = np.where(mask, rng.poisson(np.maximum(meas_src, 0) * d)
+                                / np.maximum(d, 1e-9), 0.0)
+                key = "c250" if lv == 250 else "c100"
+                if meth == "cell":
+                    pred = fill[lv]
+                elif meth == "bilinear":
+                    pred = fill_bilinear(crate[lv], data[key], F)
+                elif meth == "harmonic":
+                    pred = fill_harmonic(crate[lv], data[key], F, mask, meas)
+                elif meth == "harmonic_c":     # coarse anchors only
+                    pred = fill_harmonic(crate[lv], data[key], F, mask,
+                                         np.zeros_like(meas), w_fine=0.0)
+                else:
+                    pred = fill_kriging(crate[lv], data[key], F, mask, meas, d,
+                                        cvar[lv])
+            e_ad = pixel_errors(r_hat, var_hat, d, mask, pred)
+            ratio = e_ras[valid].sum() / e_ad[valid].sum()
+            ci = block_bootstrap_ratio(e_ras, e_ad, valid, n_boot=args.boot)
+            q_ad = sqrt_errors(r_hat, t_truth, d, mask, pred)
+            task = simulate_tasks(r_hat, d, mask, pred, spot_valid, lab, n_spots,
+                                  k=args.spot_k, n_draws=args.draws)
+            # area = fraction scanned at the ROI dwell (floor variants measure
+            # 100 % of the pixels, the rest at the floor)
+            rows.append(_row(sample, target, tname, name, roi, valid, ratio, ci,
+                             q_ras[valid].sum() / q_ad[valid].sum(),
+                             top_share(e_ad, valid), task, n_spots))
     return rows
 
 
@@ -249,16 +324,17 @@ def main():
         for t in args.targets:
             print(f"  {s} {t} ...", flush=True)
             rows += evaluate(s, t, args)
-    hdr = (f"{'sample':7} {'target':9} {'tr':2} {'strategy':15} {'area':>5} "
+    hdr = (f"{'sample':7} {'target':9} {'tr':2} {'strategy':20} {'area':>5} "
            f"{'MSE ratio [95% CI]':>21} {'sqrt':>5} {'top1%':>5} "
            f"{'quant':>6} {'recall':>6} {'prec':>5}")
     print("\n" + hdr + "\n" + "-" * len(hdr))
     for r in rows:
-        print(f"{r['sample']:7} {r['target']:9} {r['truth']:2} {r['strategy']:15} "
+        print(f"{r['sample']:7} {r['target']:9} {r['truth']:2} {r['strategy']:20} "
               f"{r['area']:5.0%} {r['mse_ratio']:6.2f} [{r['ci_lo']:5.2f},{r['ci_hi']:5.2f}] "
               f"{r['sqrt_ratio']:5.2f} {r['top1pct_share']:5.0%} "
               f"{r['quant_err']:6.1%} {r['recall']:6.0%} {r['precision']:5.0%}")
-    out = Path(args.out)
+    out = Path(args.out or PROJECT_ROOT / "outputs" /
+               ("evaluation_step2.csv" if args.step2 else "evaluation_step1.csv"))
     out.parent.mkdir(exist_ok=True)
     with open(out, "w", newline="") as f:
         w = csv.DictWriter(f, fieldnames=list(rows[0]))

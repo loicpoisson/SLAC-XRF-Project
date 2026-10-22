@@ -210,19 +210,46 @@ def register_rows(moving, reference, band=40, max_shift=8, smooth=5):
 
 # ── variance-stabilised criterion (review F3) ──────────────────────────────────
 
+_LAM = np.concatenate([[0.0], np.logspace(-4, np.log10(400.0), 600)])
+
+
+def _sqrt_var_table():
+    from scipy.stats import poisson
+    out = np.empty_like(_LAM)
+    for i, lam in enumerate(_LAM):
+        n = np.arange(0, int(lam + 12 * np.sqrt(lam) + 30))
+        p = poisson.pmf(n, lam)
+        m = (np.sqrt(n) * p).sum()
+        out[i] = max((n * p).sum() - m * m, 0.0)
+    return out
+
+
+_SQRT_VAR = _sqrt_var_table()
+
+
+def sqrt_poisson_var(lam):
+    """Exact Var(sqrt(N)), N ~ Poisson(lam) (-> 1/4 for large lam). The 1/(4 t)
+    approximation is badly off below a few counts (review F3)."""
+    lam = np.maximum(np.asarray(lam, dtype=float), 0.0)
+    v = np.interp(lam, _LAM, _SQRT_VAR)
+    return np.where(lam > _LAM[-1], 0.25, v)
+
+
 def sqrt_errors(truth_rate, t_truth, dwell, mask, pred_rate):
-    """Expected squared error in the sqrt-rate domain (Anscombe-like).
+    """Expected squared error in the sqrt-rate domain.
 
     The Poisson MSE is dominated by a few very bright pixels (a missed
     particle costs r^2, a scanned one r/t). On sqrt(rate) the noise variance is
-    ~1/(4 t) whatever the rate, so every pixel weighs alike. Approximation
-    valid for >~ a few counts; debiased for the truth's own noise (1/(4 t_truth)).
+    ~1/(4 t) whatever the rate, so every pixel weighs alike. Uses the exact
+    Var(sqrt(N/t)) = Var(sqrt N) / t, for the scanned pixels and for the
+    truth-noise debias of the unscanned ones.
     """
-    sq = np.sqrt(np.maximum(truth_rate, 0.0))
-    scanned = np.where(mask, 1.0 / (4.0 * np.maximum(dwell, 1e-9)), 0.0)
+    r = np.maximum(truth_rate, 0.0)
+    t = np.maximum(dwell, 1e-9)
+    scanned = np.where(mask, sqrt_poisson_var(r * t) / t, 0.0)
     unscanned = np.where(mask, 0.0,
-                         (np.sqrt(np.maximum(pred_rate, 0.0)) - sq) ** 2
-                         - 1.0 / (4.0 * t_truth))
+                         (np.sqrt(np.maximum(pred_rate, 0.0)) - np.sqrt(r)) ** 2
+                         - sqrt_poisson_var(r * t_truth) / t_truth)
     return scanned + unscanned
 
 
