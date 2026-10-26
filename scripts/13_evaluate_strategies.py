@@ -243,8 +243,11 @@ def evaluate(sample, target, args):
     variants = {}
     if args.step2:
         for lv in (250, 100):
-            for meth in (("bilinear", "harmonic_c")
+            # order matters: every variant draws its simulated ROI acquisition
+            # from the same random stream
+            for meth in (("bilinear",)
                          + (("harmonic",) if args.fine_anchored else ())
+                         + ("harmonic_c",)
                          + (("kriging",) if args.kriging else ())):
                 variants[f"roi{lv}+{meth}"] = (strategies[f"roi{lv}"][0], lv, meth, 0.0)
         m05 = project_mask(element_roi_mask(_without_edges(maps["c100"]), 0.5),
