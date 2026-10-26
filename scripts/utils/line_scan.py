@@ -85,16 +85,19 @@ def plan_lines(dwell, xdata, ydata, v_max=V_MAX_MM_S, a_max=A_MAX_MM_S2,
     if len(rows):
         n_row = (x1 - x0 + 1)[rows]
         width = int(n_row.max())
-        C = np.full((len(rows), width), np.inf)      # rows shifted to start at 0
-        for k, r in enumerate(rows):
-            C[k, :n_row[k]] = cap[r, x0[r]:x1[r] + 1]
+        # rows shifted to start at column 0, padded with +inf past their end
+        j = np.arange(width)[None, :]
+        inrow = j < n_row[:, None]
+        src = np.minimum(x0[rows][:, None] + j, nx - 1)
+        C = np.where(inrow, cap[rows[:, None], src], np.inf)
         U = _boundary_speeds(C, px, a_max)
         T = 2.0 * px / np.maximum(U[:, :-1] + U[:, 1:], 1e-12) * 1000.0   # ms
-        for k, r in enumerate(rows):
-            m = n_row[k]
-            cross[r, x0[r]:x1[r] + 1] = T[k, :m]
-            vel[r, x0[r]:x1[r] + 1] = 0.5 * (U[k, :m] + U[k, 1:m + 1])
-            line_ms[r] = float(T[k, :m].sum())
+        T = np.where(inrow, T, 0.0)
+        V = np.where(inrow, 0.5 * (U[:, :-1] + U[:, 1:]), 0.0)
+        rr = np.broadcast_to(rows[:, None], src.shape)[inrow]
+        cross[rr, src[inrow]] = T[inrow]
+        vel[rr, src[inrow]] = V[inrow]
+        line_ms[rows] = T.sum(axis=1)
 
     got = np.where(scanned, cross, 0.0)
     move = 0.0

@@ -110,3 +110,18 @@ def test_sqrt_poisson_var_exact_limits():
     n = np.random.default_rng(6).poisson(0.5, 2_000_000)
     assert v[1] == pytest.approx(np.sqrt(n).var(), rel=0.01)
     assert abs(v[1] - 0.25) > 0.05          # the 1/(4t) shortcut is off here
+
+
+def test_calibration_table_matches_per_case_calibration():
+    # the one-pass table (script 13) must give exactly calibrate_scale's values
+    import importlib.util
+    from pathlib import Path
+    from utils.cascade import find_level_file
+    if find_level_file("UA1_P1", 100) is None:
+        pytest.skip("data not available")
+    path = Path(__file__).parent.parent / "scripts" / "13_evaluate_strategies.py"
+    spec = importlib.util.spec_from_file_location("ev13", path)
+    ev = importlib.util.module_from_spec(spec); spec.loader.exec_module(ev)
+    table = ev.calibration_table(["UB1_P1"], ["Cu.Ka"])
+    for level in (250, 100):
+        assert table[("UB1_P1", "Cu.Ka", level)] == ev.calibration("UB1_P1", "Cu.Ka", level, 25)

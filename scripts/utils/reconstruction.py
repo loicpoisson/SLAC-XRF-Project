@@ -29,6 +29,8 @@ is a stable interpolator of the coarse point samples.
 Rates are counts per ms per fine pixel.
 """
 
+from functools import lru_cache
+
 import numpy as np
 from scipy import sparse
 from scipy.interpolate import RegularGridInterpolator
@@ -74,8 +76,10 @@ def coarse_anchor_index(cdata, fdata):
 
 # ── graph Laplacian interpolation ──────────────────────────────────────────────
 
+@lru_cache(maxsize=4)
 def _grid_laplacian(ny, nx):
-    """Combinatorial Laplacian of the 4-neighbour grid graph (ny*nx nodes)."""
+    """Combinatorial Laplacian of the 4-neighbour grid graph (ny*nx nodes).
+    Cached per shape: it is the same for every fill of a given scan."""
     idx = np.arange(ny * nx).reshape(ny, nx)
     a = np.concatenate([idx[:, :-1].ravel(), idx[:-1, :].ravel()])
     b = np.concatenate([idx[:, 1:].ravel(), idx[1:, :].ravel()])
@@ -92,6 +96,10 @@ def fill_harmonic(c_rate, cdata, fdata, mask, meas, lam=1.0, w_coarse=1.0,
     Minimises  sum_i w_i (f_i - y_i)^2 + lam * sum_(i~j) (f_i - f_j)^2
     over all fine pixels, with anchors y = coarse samples (at the fine pixel
     nearest each coarse centre) and fine measurements inside `mask`.
+    Inside `mask` the fine measurement replaces the coarse anchor, so with
+    w_fine=0 only the coarse samples OUTSIDE the scanned area anchor the fill
+    (no value from inside the ROIs leaks across their border); the result
+    then depends on the mask but not on the measurements.
     """
     ny, nx = mask.shape
     y = np.zeros(ny * nx)
@@ -237,8 +245,8 @@ def reconstruct(coarse_counts, cdata, fdata, scanned, fine_counts, scale,
                 t_coarse, t_fine):
     """Final fine map of an adaptive scan, in counts at the fine dwell `t_fine`:
     the fine measurement where `scanned`, elsewhere the graph-harmonic
-    interpolation of the coarse point samples (coarse anchors only - see the
-    module docstring for why the fine anchors are left out).
+    interpolation of the coarse point samples lying outside the scanned area
+    (see fill_harmonic and the module docstring).
     Returns (reconstructed, fill)."""
     if scanned.all():                       # nothing skipped, nothing to fill
         return fine_counts.copy(), fine_counts.copy()

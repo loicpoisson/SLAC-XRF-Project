@@ -611,7 +611,7 @@ drawn from the independent scan, CG convergence check, budget guard.
 | cell (step 1) | replicate each 100 µm value over its cell |
 | bilinear | interpolate between coarse points (they are point samples, §14) |
 | harmonic | graph-Laplacian interpolation (label propagation, CS224W) on the fine grid graph, anchored on coarse points **and** the fine ROI measurements |
-| **harmonic_c** | the same, anchored on the **coarse points only** |
+| **harmonic_c** | the same, anchored only on the **coarse points lying outside the scanned area** (the ones inside are superseded by the scan) |
 | kriging | residual kriging (`--kriging`); ~100 s per case, no gain, unstable covariance fit — dropped |
 
 ROI rules for weak elements: lower threshold (k = 0.5) and a dwell floor (1–3 ms)
@@ -646,7 +646,8 @@ Mn/Cu is gone (UB1 Mn keeps a 5-point loss).
    the values of particles cut by the ROI border into the pixels just outside,
    which are darker *by construction* (the ROI is a threshold): on FP1 Fe it
    multiplied the error of the skipped pixels by ~10, and its score depended on
-   ~100 border pixels. With coarse anchors only the gain is stable everywhere.
+   ~100 border pixels. Anchored on the coarse points outside the scanned area
+   only, the gain is stable everywhere.
 2. **A dwell floor outside the ROIs is a bad idea** (0.57–1.44×, recall down):
    1–3 ms measurements of the background are noisier than the interpolated
    100 µm scan, at a real time cost.
@@ -737,4 +738,15 @@ Truth B for UA1/UB1, A for FP1; recall at the truth's threshold.
 10. **Line-plan format.** We export per-row per-pixel dwell (`.npz`); what does
     the 7-2 dataserver need to execute it (the format used for Boltz et al.)?
 
-*End of report (v6).*
+
+### 16.5 Evaluation run time
+`13_evaluate_strategies.py` was profiled: 60 % of a case went into the harmonic
+fill. It is now computed once per ROI mask (it does not depend on the truth),
+the graph Laplacian and the leave-one-sample-out calibration are computed once,
+detection labels each Monte-Carlo draw once, `threshold_map` computes only the
+requested rule, and the line kinematics pack rows without Python loops. The
+fine-anchored harmonic fill (rejected in §15) moved behind `--fine-anchored`.
+One case (UB1 Cu, `--step2 --time-model lines`) went from 203 s to 105 s with
+the remaining rows **byte-identical**; `--jobs` runs cases in parallel.
+
+*End of report (v7).*

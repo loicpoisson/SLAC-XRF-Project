@@ -53,7 +53,7 @@ from utils.validation_utils import (project_mask, project_coarse_to_fine,
 from utils.evaluation import (budget_dwell, sqrt_weight, coarse_to_fine_scale,
                               pixel_errors, raster_errors, block_bootstrap_ratio,
                               hot_spots, simulate_tasks, register_rows,
-                              sqrt_errors, top_share)
+                              sqrt_errors, top_share, sqrt_poisson_var)
 from utils.reconstruction import (coarse_rate, fill_bilinear, fill_harmonic,
                                   fill_kriging, calibrate_scale)
 from utils.line_scan import raster_line_time, fit_to_budget
@@ -77,6 +77,11 @@ def parse_args():
                    help="add step-2 strategies: reconstructions of the unscanned "
                         "pixels (bilinear / harmonic / kriging) and recall-"
                         "preserving ROI rules (dwell floor, lower threshold)")
+    p.add_argument("--fine-anchored", action="store_true",
+                   help="--step2: also the harmonic fill anchored on the fine ROI "
+                        "measurements (rejected in report section 15: values of "
+                        "particles cut by the ROI border leak outside; ~60%% of "
+                        "the run time)")
     p.add_argument("--kriging", action="store_true",
                    help="--step2: also residual kriging (~100 s per case, no gain "
                         "over bilinear on UB1 Cu)")
@@ -124,10 +129,56 @@ def load_sample(sample, target):
     return data, maps, dwell
 
 
-def calibration(sample, target, level, fine_px):
-    """Leave-one-sample-out coarse->fine scale (utils.reconstruction)."""
+def calibration(sample, target, level, fine_px, table=None):
+    """Leave-one-sample-out coarse->fine scale (utils.reconstruction).
+    `table` = precomputed {(sample, target, level): scale} (calibration_table)."""
+    if table is not None and (sample, target, level) in table:
+        return table[(sample, target, level)]
     ch = None if target == "composite" else [target]
     return calibrate_scale(sample, ch, level, fine_px, candidates=list(SAMPLES))[0]
+
+
+def calibration_table(samples, targets):
+    """All leave-one-sample-out scales in one pass, loading each HDF5 file once
+    (the per-case version reloaded every other sample's scans for every
+    element). Same formula as utils.reconstruction.calibrate_scale."""
+    data = {}
+
+    def load(path):
+        if path not in data:
+            data[path] = load_xrf(path)
+        return data[path]
+
+    ratios = {}                                   # (other, target, level, fine) -> scale
+    table = {}
+    for sample in samples:
+        fine_px = SAMPLES[sample]
+        for target in targets:
+            ch = None if target == "composite" else [target]
+            for level in (250, 100):
+                vals = []
+                for other in SAMPLES:
+                    if other == sample:
+                        continue
+                    key = (other, target, level, fine_px)
+                    if key not in ratios:
+                        pc, pf = find_level_file(other, level), _file(other, fine_px, 10)
+                        ratios[key] = None
+                        if pc is not None and pf is not None:
+                            dc, df = load(pc), load(pf)
+                            try:
+                                c, used, _ = get_composite_map(dc, ch)
+                                f, _, _ = get_composite_map(df, used)
+                            except ValueError:
+                                c = None
+                            if c is not None:
+                                cf = project_coarse_to_fine(c, dc, df)
+                                if cf.mean() > 0:
+                                    ratios[key] = float(f.mean()) / float(cf.mean())
+                    if ratios[key] is not None:
+                        vals.append(ratios[key])
+                table[(sample, target, level)] = float(np.mean(vals)) if vals else 1.0
+    return table
 
 
 def _edge_free(data, F):
@@ -175,7 +226,7 @@ def evaluate(sample, target, args):
     est, fill, crate, cvar = {}, {}, {}, {}
     for lv, key in ((250, "c250"), (100, "c100")):
         cmap = _without_edges(maps[key])
-        s = calibration(sample, target, lv, fine_px)
+        s = calibration(sample, target, lv, fine_px, getattr(args, "calib", None))
         crate[lv] = coarse_rate(cmap, s, dwell[key])           # coarse grid
         cvar[lv] = np.maximum(cmap, 0.0) * s ** 2 / dwell[key] ** 2
         est[lv] = project_coarse_to_fine(crate[lv], data[key], F)
@@ -192,14 +243,16 @@ def evaluate(sample, target, args):
     variants = {}
     if args.step2:
         for lv in (250, 100):
-            for meth in (("bilinear", "harmonic", "harmonic_c")
+            for meth in (("bilinear", "harmonic_c")
+                         + (("harmonic",) if args.fine_anchored else ())
                          + (("kriging",) if args.kriging else ())):
                 variants[f"roi{lv}+{meth}"] = (strategies[f"roi{lv}"][0], lv, meth, 0.0)
         m05 = project_mask(element_roi_mask(_without_edges(maps["c100"]), 0.5),
                            data["c100"]["xdata"], data["c100"]["ydata"],
                            F["xdata"], F["ydata"])
         variants["roi100_k0.5"] = (m05, 100, "cell", 0.0)
-        variants["roi100_k0.5+harmonic"] = (m05, 100, "harmonic", 0.0)
+        if args.fine_anchored:
+            variants["roi100_k0.5+harmonic"] = (m05, 100, "harmonic", 0.0)
         variants["roi100_k0.5+harmonic_c"] = (m05, 100, "harmonic_c", 0.0)
         for fl in args.floors:
             variants[f"roi100_floor{fl:g}"] = (strategies["roi100"][0], 100, None, fl)
@@ -226,6 +279,7 @@ def evaluate(sample, target, args):
         print(f"    B registered to A: x-shift {shifts.min()}..{shifts.max()} px")
 
     n_cell100 = int(round((100 / fine_px) ** 2))
+    harm_cache = {}
     if args.time_model == "lines":
         lt = {k: raster_line_time(maps[k].shape, data[k]["xdata"], data[k]["ydata"],
                                   dwell[k]) for k in ("c250", "c100")}
@@ -246,7 +300,9 @@ def evaluate(sample, target, args):
         # hot spots are confirmed on the area both fine scans cover
         lab, n_spots = _confirmed_spots(r_hat, other, spot_valid, args.spot_k)
         e_ras = raster_errors(r_hat, T_REF)
-        q_ras = sqrt_errors(r_hat, t_truth, np.full_like(r_hat, T_REF), full, r_hat)
+        q_tvar = sqrt_poisson_var(np.maximum(r_hat, 0.0) * t_truth) / t_truth
+        q_ras = sqrt_errors(r_hat, t_truth, np.full_like(r_hat, T_REF), full, r_hat,
+                            truth_var=q_tvar)
         base = simulate_tasks(r_hat, np.full_like(r_hat, T_REF), full, r_hat,
                               spot_valid, lab, n_spots, k=args.spot_k,
                               n_draws=args.draws)
@@ -264,7 +320,7 @@ def evaluate(sample, target, args):
             e_ad = pixel_errors(r_hat, var_hat, d, mask, pred, pred_corr=corr)
             ratio = e_ras[valid].sum() / e_ad[valid].sum()
             ci = block_bootstrap_ratio(e_ras, e_ad, valid, n_boot=args.boot)
-            q_ad = sqrt_errors(r_hat, t_truth, d, mask, pred)
+            q_ad = sqrt_errors(r_hat, t_truth, d, mask, pred, truth_var=q_tvar)
             sq_ratio = q_ras[valid].sum() / q_ad[valid].sum()
             task = simulate_tasks(r_hat, d, mask, pred, spot_valid, lab, n_spots,
                                   k=args.spot_k, n_draws=args.draws)
@@ -299,16 +355,20 @@ def evaluate(sample, target, args):
                     pred = fill_bilinear(crate[lv], data[key], F)
                 elif meth == "harmonic":
                     pred = fill_harmonic(crate[lv], data[key], F, mask, meas)
-                elif meth == "harmonic_c":     # coarse anchors only
-                    pred = fill_harmonic(crate[lv], data[key], F, mask,
-                                         np.zeros_like(meas), w_fine=0.0)
+                elif meth == "harmonic_c":     # coarse anchors outside the mask
+                    # independent of the truth: computed once per mask
+                    ck = (name, lv)
+                    if ck not in harm_cache:
+                        harm_cache[ck] = fill_harmonic(crate[lv], data[key], F, mask,
+                                                       np.zeros_like(meas), w_fine=0.0)
+                    pred = harm_cache[ck]
                 else:
                     pred = fill_kriging(crate[lv], data[key], F, mask, meas, d,
                                         cvar[lv])
             e_ad = pixel_errors(r_hat, var_hat, d, mask, pred)
             ratio = e_ras[valid].sum() / e_ad[valid].sum()
             ci = block_bootstrap_ratio(e_ras, e_ad, valid, n_boot=args.boot)
-            q_ad = sqrt_errors(r_hat, t_truth, d, mask, pred)
+            q_ad = sqrt_errors(r_hat, t_truth, d, mask, pred, truth_var=q_tvar)
             task = simulate_tasks(r_hat, d, mask, pred, spot_valid, lab, n_spots,
                                   k=args.spot_k, n_draws=args.draws)
             # area = fraction scanned at the ROI dwell (floor variants measure
@@ -334,6 +394,7 @@ def _row(sample, target, truth, name, mask, valid, ratio, ci, sq_ratio, top1,
 def main():
     args = parse_args()
     cases = [(s, t) for s in args.samples for t in args.targets]
+    args.calib = calibration_table(args.samples, args.targets)
     rows = []
     if args.jobs > 1 and len(cases) > 1:
         from concurrent.futures import ProcessPoolExecutor

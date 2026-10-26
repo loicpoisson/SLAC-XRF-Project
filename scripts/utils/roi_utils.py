@@ -114,19 +114,16 @@ def threshold_map(channel_map, method="auto", k=2.0, mask=None):
     if x.size == 0:
         return np.zeros(channel_map.shape, dtype=bool), np.nan, method
 
-    candidates = {
-        "mad":     _thresh_mad(x, k),
-        "trimmed": _thresh_trimmed(x, k),
-        "iqr":     _thresh_iqr(x, k),
-    }
+    rules = {"mad": _thresh_mad, "trimmed": _thresh_trimmed, "iqr": _thresh_iqr}
 
     if method == "sigma":
         thresh = x.mean() + k * x.std()
         method_used = "sigma"
-    elif method in candidates:
-        thresh = candidates[method]
-        method_used = method
+    elif method in rules:
+        thresh = rules[method](x, k)     # only the requested rule (each one
+        method_used = method             # sorts the whole map)
     elif method == "auto":
+        candidates = {m: f(x, k) for m, f in rules.items()}
         scores = {m: _fisher_score(x, t) for m, t in candidates.items()}
         method_used = max(scores, key=scores.get)
         thresh = candidates[method_used]

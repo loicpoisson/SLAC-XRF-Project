@@ -141,12 +141,16 @@ def _quant_error(rec, truth, lab, n):
     return float(np.median(np.abs(s_rec[ok] - s_tru[ok]) / s_tru[ok])) if ok.any() else np.nan
 
 
-def _detection(rec, lab_true, n_true, valid, thresh):
+def _detection(rec, lab_true, n_true, valid, thresh, lab_rec=None):
     """Recall / precision of hot spots re-detected on a reconstructed map at
     the TRUTH's threshold. (Re-thresholding every reconstruction on its own
     MAD moved the threshold with the fill and inflated recall at the cost of
-    precision - a metric artefact, not recovered spots.)"""
-    lab_rec, n_rec = hot_spots(rec, valid, thresh=thresh)
+    precision - a metric artefact, not recovered spots.) Pass `lab_rec` when
+    the map is already labelled."""
+    if lab_rec is None:
+        lab_rec, n_rec = hot_spots(rec, valid, thresh=thresh)
+    else:
+        lab_rec, n_rec = lab_rec
     if n_true == 0:
         return np.nan, np.nan
     hit_true = np.unique(lab_true[(lab_true > 0) & (lab_rec > 0)])
@@ -180,11 +184,11 @@ def simulate_tasks(truth_rate, dwell, mask, pred_rate, valid, lab, n_spots,
         N = rng.poisson(np.where(mask, r * t, 0.0))
         rec = np.where(mask, N / t, pred_rate)
         q.append(_quant_error(rec, r, lab, n_spots))
-        a, b = _detection(rec, lab, n_spots, valid, thresh)
+        labelled = hot_spots(rec, valid, thresh=thresh)      # once per draw
+        a, b = _detection(rec, lab, n_spots, valid, thresh, lab_rec=labelled)
         rec_.append(a); prec_.append(b)
         if skipped.any():
-            lab_rec, _ = hot_spots(rec, valid, thresh=thresh)
-            hit = np.unique(lab[(lab > 0) & (lab_rec > 0)])
+            hit = np.unique(lab[(lab > 0) & (labelled[0] > 0)])
             rsk.append(float(skipped[hit].sum() / skipped.sum()))
         mse.append(float(np.mean(((rec - r) ** 2)[valid])))
     return {"quant_err": float(np.nanmean(q)), "recall": float(np.nanmean(rec_)),
@@ -261,21 +265,25 @@ def sqrt_poisson_var(lam):
     return np.where(lam > _LAM[-1], 0.25, v)
 
 
-def sqrt_errors(truth_rate, t_truth, dwell, mask, pred_rate):
+def sqrt_errors(truth_rate, t_truth, dwell, mask, pred_rate, truth_var=None):
     """Expected squared error in the sqrt-rate domain.
 
     The Poisson MSE is dominated by a few very bright pixels (a missed
     particle costs r^2, a scanned one r/t). On sqrt(rate) the noise variance is
     ~1/(4 t) whatever the rate, so every pixel weighs alike. Uses the exact
     Var(sqrt(N/t)) = Var(sqrt N) / t, for the scanned pixels and for the
-    truth-noise debias of the unscanned ones.
+    truth-noise debias of the unscanned ones. `truth_var` (= this debias term,
+    sqrt_poisson_var(r * t_truth) / t_truth) can be passed when scoring many
+    strategies against the same truth.
     """
     r = np.maximum(truth_rate, 0.0)
     t = np.maximum(dwell, 1e-9)
+    if truth_var is None:
+        truth_var = sqrt_poisson_var(r * t_truth) / t_truth
     scanned = np.where(mask, sqrt_poisson_var(r * t) / t, 0.0)
     unscanned = np.where(mask, 0.0,
                          (np.sqrt(np.maximum(pred_rate, 0.0)) - np.sqrt(r)) ** 2
-                         - sqrt_poisson_var(r * t_truth) / t_truth)
+                         - truth_var)
     return scanned + unscanned
 
 
