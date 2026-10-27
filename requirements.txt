@@ -1,0 +1,17 @@
+# Phase 1 pipeline, evaluation and tests — versions of the smak venv
+# (C:\tools\smak\env, Python 3.10.11) on which every result in
+# outputs/progress_report.md was produced.
+numpy==1.26.4
+scipy==1.12.0
+h5py==3.16.0
+matplotlib==3.10.9
+pytest==9.0.3
+# (scikit-image / scikit-learn are in the venv but no script imports them)
+
+# SMAK (Sam Webb, SLAC) is installed in the same venv; only its source was
+# read (dataqueue format, channel layout) — the pipeline does not import it,
+# except tests/test_smak_export.py, which skips when it is missing.
+# smak==3.0.11
+
+# Phase 2 (phase2_ml/) needs torch: install it in a SEPARATE venv or use
+# Colab, never in the smak env.

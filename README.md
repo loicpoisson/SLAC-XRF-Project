@@ -10,14 +10,17 @@ fine scans, and a paper-aligned **Poisson-MSE quality metric**.
 
 > **Detailed write-up:** [`outputs/progress_report.md`](outputs/progress_report.md)
 
-## Headline finding
+## Headline finding (2026-10, report §13–16)
 
-On these samples the **composite** (sum of all elements) is **dense** (75–82 % of the
-area occupied) — so spatial skipping can't beat a fine raster on the composite.
-But **per element**, the signal is **sparse hot spots** (~10–15 % of pixels, 50–100 %
-concentration; e.g. S, P, Al, Ti). Since XRF imaging targets *specific* elements,
-**that is where adaptive scanning pays off** — the pipeline should target a single
-element's ROIs, not the composite. (See `scripts/11_profile_samples.py --per-element`.)
+Targeting **one element** pays; targeting the composite does not.
+`10_run_pipeline.py --target <element>` scans 250 µm, then a full 100 µm frame,
+then only that element's 100 µm hot spots at 25 µm with a √-signal dwell, fills
+the skipped pixels by graph-harmonic interpolation of the 100 µm points, and
+exports the plan as per-line variable-dwell scans. At **equal real time**
+(acceleration ramps and row moves included) it beats a uniform raster on
+Poisson MSE in 10 / 12 element × sample cases (1.08–1.58×) while losing at most
+3 points of hot-spot recall (Fe, Zn, Mn, Cu on UA1 / UB1 / FP1). Hot spots
+cannot be found from 250 µm: the coarse scans behave like point samples.
 
 ## What the pipeline does
 
@@ -38,8 +41,9 @@ strategy — and that, at equal scan time, it beats a uniform raster (UA1: MSE r
 
 ## Quick start
 
-Use the SMAK virtual env on the dev machine (`C:\tools\smak\env\`) or
-`pip install numpy scipy matplotlib h5py` (+ `pytest` to run the tests).
+Use the SMAK virtual env on the dev machine (`C:\tools\smak\env\`), or create one
+with `pip install -r requirements.txt` (pinned versions the results were produced
+with; Python 3.10.11).
 
 ### Production — iterative, one beamline step at a time
 ```bash
@@ -68,9 +72,10 @@ planned, and a graph-harmonic interpolation of the previous level elsewhere
 python scripts/10_run_pipeline.py --simulate --sample UA1_P1                  # composite
 python scripts/10_run_pipeline.py --simulate --sample UB1_P1 --target Zn.Ka   # one element
 ```
-MSE ratios are at equal total time, including the earlier levels (see §13 of
-the progress report: element targeting wins 1.1-1.5x in 8/9 cases, the
-composite cascade does not).
+MSE ratios are at equal total time, including the earlier levels. They are
+scored against the single 10 ms fine scan without removing its own noise, so
+they read lower than the reference numbers of `13_evaluate_strategies.py`
+(report §14–16) — use script 13 for anything you report.
 
 ### Robust comparison of strategies (independent truth, real coarse fill)
 ```bash
@@ -87,7 +92,7 @@ python scripts/11_profile_samples.py --per-element   # per element channel
 
 ### Tests
 ```bash
-python -m pytest tests/ -q        # 94 tests
+python -m pytest tests/ -q        # 95 tests
 ```
 
 ## Repo layout
@@ -95,21 +100,17 @@ python -m pytest tests/ -q        # 94 tests
 SLAC-XRF-Project/
 ├── README.md                  ← you are here
 ├── CLAUDE.md                  ← project context for assistants
+├── requirements.txt           ← pinned versions
 ├── data/                      ← raw HDF5 (gitignored, too large)
-├── outputs/                   ← figures, reports, scan plans
+├── outputs/                   ← progress report, evaluation CSVs, figures
 ├── tests/                     ← pytest suite (golden values + unit tests)
+├── phase2_ml/                 ← ML notebooks (separate torch env)
 └── scripts/
-    ├── 01_roi_detection.py        — ROI detection on coarse
-    ├── 02_trajectory.py           — TSP trajectory (NN + 2-opt + Or-opt)
-    ├── 03_validate_roi.py         — validate ROI vs ground truth
-    ├── 04_validate_morphological.py — sample-footprint mask
-    ├── 05_validate_hierarchical.py  — multi-resolution cascade
-    ├── 06_pareto_sweep.py         — methods comparison + Pareto frontier
-    ├── 07_validate_temporal.py    — temporal adaptive dwell (Paper 2 style)
-    ├── 08_validate_combined.py    — spatial + temporal
-    ├── 09_recommend_strategy.py   — descriptors + auto-recommendation
     ├── 10_run_pipeline.py         — PRODUCTION: iterative cascade (stepwise + simulate)
     ├── 11_profile_samples.py      — sparsity profiler (per-sample / per-element)
+    ├── 12_report_figures.py       — report figures (MSE per dwell strategy, per element)
+    ├── 13_evaluate_strategies.py  — REFERENCE evaluation (independent truth, CIs)
+    ├── 01..09_*.py                — historical v1 exploration, see below
     └── utils/
         ├── hdf5_reader.py   — SSRL HDF5 loader + composite map
         ├── roi_utils.py     — thresholding, labeling, TSP, ROI grouping
@@ -119,9 +120,21 @@ SLAC-XRF-Project/
         ├── quality.py       — Poisson MSE / SNR metrics
         ├── validation_utils.py — grid projection, metrics, travel overhead
         ├── plotting.py      — save_and_show (headless-safe figures)
+        ├── reconstruction.py — fills of the skipped pixels (graph-harmonic, ...), calibration
+        ├── line_scan.py     — per-line variable-dwell plans, acceleration ramps
+        ├── evaluation.py    — independent-truth scoring, task metrics, bootstrap
+        ├── smak_export.py   — SMAK dataqueue (.dpm) region files
         ├── cli.py           — shared argparse helpers
         └── paths.py         — portable data/output path discovery
 ```
+
+**Historical scripts 01–09.** They are the v1 exploration described in report §5
+(ROI detection, trajectory, morphological mask, hierarchical cascade, Pareto
+sweep, temporal and combined dwell, recommender). They still run, and now use the
+corrected loader, but **none of the current results comes from them**: their
+metrics predate the independent-truth protocol (fill from the fine truth, no
+coarse-time charge, own-threshold detection). Use `13_evaluate_strategies.py` for
+any number you want to report.
 
 ## Key references
 - **Paper 1** — Betterton et al. (2020), *Reinforcement Learning for Adaptive
@@ -131,11 +144,14 @@ SLAC-XRF-Project/
   reinforcement learning*, J. Synchrotron Rad. 33, 162–169 — the temporal /
   equal-time-quality strategy is inspired by this work.
 
-## Status
-- Phase 1 pipeline: complete, iterative, tested (94 tests), validated on UA1 / UB1 / FP1.
-- Honest scope: spatial speedup needs **sparse** targets → demonstrated per-element,
-  not on the dense composite; temporal `sqrt` improves MSE at equal time on dense samples.
-- Open questions for the beamline (see report §10): per-pixel dwell map vs uniform-dwell
-  regions, scanner kinematics, confirm per-element focus.
-- Phase 2 (ML / RL): scaffolding in `phase2_ml/` (U-Net dwell-map POC).
+## Status (2026-10)
+- Phase 1 pipeline: complete, reviewed, 95 tests; validated in simulation on
+  UA1 / UB1 / FP1 with an independent truth (report §14–16).
+- Not yet validated on the beamline: the next step is one sample × one element
+  at equal time against a raster.
+- Open questions for Sam: report §13.2, §14.4, §16.4 (coarse beam footprint,
+  quality criterion, line-plan format for 7-2, counting during gap crossings,
+  TIME channel).
+- Phase 2 (`phase2_ml/`): the U-Net dwell-map POC does not beat the √ heuristic;
+  graph methods are surveyed in `Papers/reports/` (local).
 ```
