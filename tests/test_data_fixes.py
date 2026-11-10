@@ -68,7 +68,7 @@ def test_threshold_map_empty_mask():
 
 
 def _load_pipeline():
-    path = Path(__file__).parent.parent / "scripts" / "10_run_pipeline.py"
+    path = Path(__file__).parent.parent / "scripts" / "xrf_pipeline.py"
     spec = importlib.util.spec_from_file_location("run_pipeline", path)
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)

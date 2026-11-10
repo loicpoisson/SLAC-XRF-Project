@@ -241,6 +241,23 @@ def calibrate_scale(sample, channels, coarse_px, fine_px, candidates=None,
     return (float(np.mean(scales)), len(scales)) if scales else (1.0, 0)
 
 
+def self_scale(coarse_counts, cdata, fdata, scanned, fine_counts, min_px=200):
+    """Coarse -> fine COUNT scale measured on the sample itself: the ratio of
+    the mean fine counts to the mean (bilinearly interpolated) coarse counts
+    over the pixels scanned at both resolutions. Needs no other sample and
+    absorbs any dwell / unit difference between the two files. On the May 2026
+    scans it reconstructs the skipped pixels as well as the leave-one-sample-
+    out factor (within 1-3 % in MSE); an affine fit is much worse.
+    Returns None when fewer than `min_px` pixels are scanned or the coarse
+    mean there is not positive."""
+    if int(scanned.sum()) < min_px:
+        return None
+    c = fill_bilinear(np.maximum(coarse_counts, 0.0).astype(float), cdata, fdata)
+    cm = float(c[scanned].mean())
+    fm = float(np.maximum(fine_counts, 0.0)[scanned].mean())
+    return fm / cm if cm > 0 and fm > 0 else None
+
+
 def reconstruct(coarse_counts, cdata, fdata, scanned, fine_counts, scale,
                 t_coarse, t_fine):
     """Final fine map of an adaptive scan, in counts at the fine dwell `t_fine`:

@@ -45,37 +45,53 @@ Use the SMAK virtual env on the dev machine (`C:\tools\smak\env\`), or create on
 with `pip install -r requirements.txt` (pinned versions the results were produced
 with; Python 3.10.11).
 
-### Production — iterative, one beamline step at a time
-```bash
-# step 0: analyse the coarse scan, plan the next (finer) level
-python scripts/10_run_pipeline.py --coarse data/.../UA1_P1_250um....hdf5
-# step N: feed the level you just acquired, plan the next one
-python scripts/10_run_pipeline.py --scan data/.../UA1_P1_100um....hdf5 \
-       --resume outputs/UA1_P1_cascade_state.pkl
-# target one element (recommended): 250um -> full-frame 100um detection scan
-# -> 25um scan of that element's hot spots only, sqrt dwell
-python scripts/10_run_pipeline.py --coarse <coarse>.hdf5 --target Zn.Ka
-python scripts/10_run_pipeline.py --scan <100um>.hdf5 --resume outputs/<S>_cascade_state.pkl --target Zn.Ka
-```
-Outputs per step: a text report, `*_scan_plan.json` (regions + dwells),
-`*_scan_plan.dpm` (SMAK "Export scan area to dataqueue" region file), `*_dwell_map.npy` (exact per-pixel
-dwell), and a figure. When the last level is fed back with `--resume`, the
-cascade ends with `*_reconstruction.npy/.png`: the fine scan where it was
-planned, and a graph-harmonic interpolation of the previous level elsewhere
-(coarse->fine scale calibrated on the other samples in `data/`, or
-`--coarse-scale`). `--simulate` scores that same reconstruction. Each step also writes
-`*_line_plan.npz`: the next level as unidirectional rows with a per-pixel dwell
-(the kind of scan Boltz et al. ran on 7-2), timed with acceleration ramps.
+### On the beamline — one element, three steps
 
-### Offline validation — full cascade when all resolutions exist
+Before the first run, put the scanner's real numbers in `beamline.json`
+(max speed and acceleration, dwell bounds, default ladder). The values shipped
+are from Betterton et al. (2020), not measured on 7-2.
+
 ```bash
-python scripts/10_run_pipeline.py --simulate --sample UA1_P1                  # composite
-python scripts/10_run_pipeline.py --simulate --sample UB1_P1 --target Zn.Ka   # one element
+# 1. you have the coarse 250 um scan -> plan of the full-frame 100 um detection scan
+python scripts/10_run_pipeline.py --coarse <250um>.hdf5 --target Zn.Ka
+# 2. you acquired it -> plan of the 25 um scan of the Zn hot spots
+python scripts/10_run_pipeline.py --scan <100um>.hdf5 --resume outputs/<S>_cascade_state.pkl
+# 3. you acquired that plan (one or several files) -> final reconstructed map
+python scripts/10_run_pipeline.py --scan <25um_a>.hdf5 <25um_b>.hdf5 --resume outputs/<S>_cascade_state.pkl
 ```
-MSE ratios are at equal total time, including the earlier levels. They are
-scored against the single 10 ms fine scan without removing its own noise, so
-they read lower than the reference numbers of `13_evaluate_strategies.py`
-(report §14–16) — use script 13 for anything you report.
+- The cascade settings (`--target`, `--roi-k`, ladder) are fixed at step 1 and
+  stored in the state file; later steps reuse them and refuse a contradiction.
+  `--levels 250 100 25` overrides the ladder of `beamline.json`.
+- Each step writes `<stem>_line_plan.npz` (the next level as unidirectional
+  rows with a per-pixel dwell and the stage speed, acceleration ramps included —
+  the kind of scan Boltz et al. ran on 7-2), `<stem>_scan_plan.dpm` (SMAK
+  dataqueue rectangles, fallback), a JSON summary, the dwell map and a figure.
+- The last scan may be **partial**: only the planned pixels need to be there
+  (`TIME = 0` elsewhere), with any per-pixel dwell, in one or several files.
+  A file at another pixel size is refused; so is a scan covering less than half
+  of the plan (`--force-level` overrides both).
+- The final map (`<stem>_reconstruction.npy/.png`) holds the measurement where
+  it was planned and measured, and elsewhere a graph-harmonic interpolation of
+  the 100 um scan, rescaled on the sample itself (ratio over the pixels scanned
+  at both resolutions). It is in counts at the median dwell of the scanned
+  pixels; `<stem>_dwell_rel.npy` gives each pixel's dwell relative to that and
+  `<stem>_scanned_mask.npy` what was really measured.
+- `--out-dir` / `--data-dir` choose the folders; `import xrf_pipeline;
+  xrf_pipeline.main([...])` runs the same thing from Python.
+
+Not validated yet: the exact file format the 7-2 dataserver needs for a line
+plan, and what a real variable-dwell scan file looks like (report §16.4, §17).
+
+### Offline validation — when every resolution already exists on disk
+```bash
+python scripts/10_run_pipeline.py --simulate --sample UB1_P1 --target Zn.Ka   # one element
+python scripts/10_run_pipeline.py --simulate --sample UA1_P1                  # composite cascade
+```
+The printed MSE ratio is the debiased Poisson MSE of `utils/evaluation.py`, at
+equal real time on the line plan, with a 95 % interval — the same method as
+script 13 (UB1 Zn: 1.32× here, 1.44× there; the difference is script 13's
+exclusion of the fly-scan edge columns and its dwell allocation). Script 13,
+with the independent second scan as truth, remains the reference.
 
 ### Robust comparison of strategies (independent truth, real coarse fill)
 ```bash
@@ -92,7 +108,7 @@ python scripts/11_profile_samples.py --per-element   # per element channel
 
 ### Tests
 ```bash
-python -m pytest tests/ -q        # 95 tests
+python -m pytest tests/ -q        # 118 tests; also run by GitHub Actions on every push
 ```
 
 ## Repo layout
@@ -101,12 +117,14 @@ SLAC-XRF-Project/
 ├── README.md                  ← you are here
 ├── CLAUDE.md                  ← project context for assistants
 ├── requirements.txt           ← pinned versions
+├── beamline.json              ← scanner parameters (speed, acceleration, dwell bounds, ladder)
 ├── data/                      ← raw HDF5 (gitignored, too large)
 ├── outputs/                   ← progress report, evaluation CSVs, figures
 ├── tests/                     ← pytest suite (golden values + unit tests)
 ├── phase2_ml/                 ← ML notebooks (separate torch env)
 └── scripts/
-    ├── 10_run_pipeline.py         — PRODUCTION: iterative cascade (stepwise + simulate)
+    ├── 10_run_pipeline.py         — PRODUCTION command line (launcher)
+    ├── xrf_pipeline.py            — the pipeline itself, importable (stepwise + simulate)
     ├── 11_profile_samples.py      — sparsity profiler (per-sample / per-element)
     ├── 12_report_figures.py       — report figures (MSE per dwell strategy, per element)
     ├── 13_evaluate_strategies.py  — REFERENCE evaluation (independent truth, CIs)
@@ -124,6 +142,7 @@ SLAC-XRF-Project/
         ├── line_scan.py     — per-line variable-dwell plans, acceleration ramps
         ├── evaluation.py    — independent-truth scoring, task metrics, bootstrap
         ├── smak_export.py   — SMAK dataqueue (.dpm) region files
+        ├── beamline.py      — loads beamline.json (single source of scanner parameters)
         ├── cli.py           — shared argparse helpers
         └── paths.py         — portable data/output path discovery
 ```
@@ -145,7 +164,7 @@ any number you want to report.
   equal-time-quality strategy is inspired by this work.
 
 ## Status (2026-10)
-- Phase 1 pipeline: complete, reviewed, 95 tests; validated in simulation on
+- Phase 1 pipeline: complete, reviewed, 118 tests (CI); validated in simulation on
   UA1 / UB1 / FP1 with an independent truth (report §14–16).
 - Not yet validated on the beamline: the next step is one sample × one element
   at equal time against a raster.

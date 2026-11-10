@@ -1,0 +1,12 @@
+{
+  "_comment": "Scanner parameters used by the planner. Edit the values for your beamline; XRF_BEAMLINE=<path> selects another file. Kinematics below are from Betterton et al. (ICRA 2020), NOT measured on SSRL 7-2: confirm them before trusting any time estimate.",
+  "name": "default (Betterton 2020 kinematics)",
+  "v_max_mm_s": 200.0,
+  "a_max_mm_s2": 500.0,
+  "region_setup_ms": 500.0,
+  "line_setup_ms": 0.0,
+  "fine_dwell_ms": 10.0,
+  "dwell_low_ms": 1.0,
+  "dwell_high_ms": 50.0,
+  "target_ladder_um": [250, 100, 25]
+}

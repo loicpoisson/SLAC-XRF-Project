@@ -24,9 +24,10 @@ mm/s for readability).
 
 import numpy as np
 
+from .beamline import BEAMLINE
 from .roi_utils import V_MAX_MM_S, A_MAX_MM_S2, travel_time
 
-LINE_SETUP_MS = 0.0   # per-line trigger / settle overhead (unknown for 7-2)
+LINE_SETUP_MS = BEAMLINE["line_setup_ms"]   # per-line trigger / settle overhead
 
 
 def _boundary_speeds(cap, px_mm, a_max):

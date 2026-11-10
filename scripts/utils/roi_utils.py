@@ -346,9 +346,12 @@ def get_bounding_boxes(labeled, xdata, ydata):
 # in validation_utils / the scripts) defaults to these. Change them HERE when
 # moving to different motors.
 
-V_MAX_MM_S  = 200.0   # scanner max velocity [mm/s]      (Paper 1)
-A_MAX_MM_S2 = 500.0   # scanner max acceleration [mm/s²] (Paper 1)
-SETUP_MS    = 500.0   # per-region overhead (positioning, triggering) [ms]
+# Scanner kinematics come from beamline.json (utils.beamline); the defaults
+# are Paper 1's values (200 mm/s, 500 mm/s², 500 ms per region).
+from .beamline import BEAMLINE
+V_MAX_MM_S  = BEAMLINE["v_max_mm_s"]        # scanner max velocity [mm/s]
+A_MAX_MM_S2 = BEAMLINE["a_max_mm_s2"]       # scanner max acceleration [mm/s²]
+SETUP_MS    = BEAMLINE["region_setup_ms"]   # per-region overhead [ms]
 
 
 def travel_time(distance_mm, v_max=V_MAX_MM_S, a_max=A_MAX_MM_S2):

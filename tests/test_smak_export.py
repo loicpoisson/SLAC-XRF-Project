@@ -112,7 +112,7 @@ def test_reader_rejects_bad_header(tmp_path):
 
 
 def test_accepts_real_region_dict_from_pipeline(tmp_path):
-    path = Path(__file__).parent.parent / "scripts" / "10_run_pipeline.py"
+    path = Path(__file__).parent.parent / "scripts" / "xrf_pipeline.py"
     spec = importlib.util.spec_from_file_location("run_pipeline", path)
     rp = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(rp)

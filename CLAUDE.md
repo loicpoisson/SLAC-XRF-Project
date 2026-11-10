@@ -76,6 +76,9 @@ predate the corrections listed in its erratum).
   10/12 element x sample cases (1.08-1.58x) and loses at most 3 points of
   hot-spot recall. ROIs found at 250 um, the composite target, and the full
   250/100/50/25 cascade do not pay.
+- Stepwise use: settings are stored in the cascade state at step 0; the last
+  scan may be partial / multi-file; reconstruction scale is self-calibrated
+  (report §17). GitHub Actions runs the tests (synthetic end-to-end included).
 - Reference evaluation: `scripts/13_evaluate_strategies.py` (independent
   truth, measured coarse fill, MSE + sqrt-MSE + quantification + detection,
   block-bootstrap CIs; `--step2`, `--time-model lines`, `--jobs`).
@@ -89,10 +92,12 @@ SLAC-XRF-Project/
 ├── CLAUDE.md          ← this file, auto-read at every session
 ├── README.md          ← how to run everything
 ├── requirements.txt   ← pinned versions of the smak venv
+├── beamline.json      ← scanner parameters (utils/beamline.py); never hard-code them
 ├── Papers/            ← reference PDFs + research notes/reports (gitignored)
 ├── data/              ← raw XRF datasets (gitignored)
 ├── scripts/
-│   ├── 10_run_pipeline.py        ← production pipeline (stepwise / --simulate)
+│   ├── 10_run_pipeline.py        ← production command line (launcher)
+│   ├── xrf_pipeline.py           ← the pipeline, importable (stepwise / --simulate)
 │   ├── 11_profile_samples.py, 12_report_figures.py
 │   ├── 13_evaluate_strategies.py ← reference evaluation
 │   ├── 01..09_*.py               ← historical v1 exploration (see README)

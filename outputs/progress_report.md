@@ -749,4 +749,58 @@ fine-anchored harmonic fill (rejected in §15) moved behind `--fine-anchored`.
 One case (UB1 Cu, `--step2 --time-model lines`) went from 203 s to 105 s with
 the remaining rows **byte-identical**; `--jobs` runs cases in parallel.
 
-*End of report (v7).*
+
+## 17. Making the pipeline operational (2026-11)
+
+Goal: everything a first beamline trial needs, short of what only the beamline
+can tell (formats, kinematics). Reviewed adversarially; the review's five major
+findings were usage traps and are fixed with regression tests.
+
+- **Importable module.** The pipeline is `scripts/xrf_pipeline.py`
+  (`main(argv)`, `--out-dir`, `--data-dir`); `10_run_pipeline.py` is its
+  command line.
+- **`beamline.json`.** Stage speed and acceleration, dwell bounds, reference
+  dwell and the default `--target` ladder live in one validated file instead of
+  constants. The shipped values are Betterton et al.'s, **not** 7-2's.
+- **Partial final scan.** The last step places one or several acquired files
+  on the planned grid, uses the `TIME` channel to bring pixels and files
+  acquired at different dwells onto one scale (overlaps add up), and
+  reconstructs what was planned but not measured like the skipped pixels. A
+  file at the wrong pixel size, or covering under half of the plan, is refused.
+- **Self-calibrated reconstruction.** The coarse → fine count scale is the
+  ratio of the means over the pixels scanned at both resolutions of the sample
+  itself. On the 12 element × sample cases it reconstructs the skipped pixels
+  as well as the leave-one-sample-out factor (within 1–3 % in MSE) and needs no
+  other sample; an affine fit is 1.5–3× worse.
+- **Cascade settings live in the state.** `--target`, `--roi-k` and the ladder
+  are fixed at step 0; resuming without them reuses them, contradicting them is
+  refused, and re-running step 0 once the detection scan is on disk no longer
+  shortens the ladder.
+- **One MSE.** `--simulate` prints the debiased Poisson MSE of
+  `utils/evaluation.py`, on the dwell the line plan delivers, with a 95 %
+  interval (UB1 Zn: 1.32× [1.29, 1.35]; script 13, truth A: 1.44×).
+- **Tests.** 118, including a synthetic end-to-end cascade (250 → 100 →
+  partial 25 µm in two files at variable dwell); GitHub Actions runs them
+  without the beamline data.
+
+### 17.1 What the default plan really does
+At the default k = 0.5 the 25 µm scan still covers **72 % of the frame** on
+UB1 Zn (mean dwell 11.4 ms against 10 ms for the raster): the gain comes from
+a modest reallocation, not from skipping most of the sample. On a flat-noise
+background the rule selects even more (a fixed share of pure noise exceeds a
+low threshold and the 1-pixel ring spreads it). A threshold on the *smoothed*
+100 µm map, or a minimum ROI size, would cut the noise-only selections — to
+test with script 13 before changing the default.
+
+### 17.2 Still open (needs the beamline)
+- Line-plan file format for the 7-2 dataserver; valid `.dpm` field values.
+- What a real variable-dwell scan file contains (are gap crossings recorded
+  with `TIME > 0`? one file or one per region?). The final step assumes
+  `TIME = 0` where nothing was acquired and ignores measured pixels that were
+  not planned.
+- Fly-scan edge pixels: in the existing scans the first column integrates ~65×
+  longer and its rate is not exactly proportional to `TIME`; in a line plan the
+  first pixel of every row may behave the same.
+- Real kinematics for `beamline.json`.
+
+*End of report (v8).*

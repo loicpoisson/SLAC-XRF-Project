@@ -74,7 +74,7 @@ def test_pipeline_line_plan_resamples_and_matches_raster_time():
     import importlib.util
     from pathlib import Path
     from types import SimpleNamespace
-    path = Path(__file__).parent.parent / "scripts" / "10_run_pipeline.py"
+    path = Path(__file__).parent.parent / "scripts" / "xrf_pipeline.py"
     spec = importlib.util.spec_from_file_location("rp", path)
     rp = importlib.util.module_from_spec(spec); spec.loader.exec_module(rp)
     grid = {"xdata": np.arange(12) * 0.1, "ydata": np.arange(8) * 0.1}

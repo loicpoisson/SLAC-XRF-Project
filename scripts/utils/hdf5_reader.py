@@ -88,6 +88,33 @@ def load_xrf(filepath, normalize_time=True):
     }
 
 
+def measured_mask(filepath):
+    """Pixels that were actually acquired: TIME > 0 (all True if the file has
+    no TIME channel). A partial or adaptive scan leaves TIME = 0 where the
+    beam never dwelt."""
+    with h5py.File(filepath, "r") as f:
+        labels = [s.decode() if isinstance(s, bytes) else s
+                  for s in f["main"].attrs.get("labels", [])]
+        shape = f["main/mapdata"].shape
+        if "TIME" not in labels:
+            return np.ones(shape[:2], dtype=bool)
+        offset = shape[2] - len(labels)
+        return f["main/mapdata"][:, :, labels.index("TIME") + offset] > 0
+
+
+def median_time(filepath):
+    """Median raw TIME over the acquired pixels (the file's own unit), or None
+    when the file has no TIME channel. Used to compare dwells between files."""
+    with h5py.File(filepath, "r") as f:
+        labels = [s.decode() if isinstance(s, bytes) else s
+                  for s in f["main"].attrs.get("labels", [])]
+        if "TIME" not in labels:
+            return None
+        shape = f["main/mapdata"].shape
+        t = f["main/mapdata"][:, :, labels.index("TIME") + shape[2] - len(labels)]
+    return float(np.median(t[t > 0])) if np.any(t > 0) else None
+
+
 def get_channel(data, name):
     """
     Extract one element map by channel name (e.g. 'Fe.Ka').
