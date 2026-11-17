@@ -73,7 +73,7 @@ def _example(seed=0, ny=16, nx=18, ratio=4):
     shape = (len(case.F["ydata"]), len(case.F["xdata"]))
     return {"sample": "SYN", "target": "X", "fine_px": 25, "x": feat, "src": src,
             "dst": dst, "erel": rel, "nbr": nbr, "qrel": qrel, "base": base,
-            "rho": np.float32(0.25), "shape": shape, "y": y,
+            "rho": np.float32(0.25), "shape": shape, "cshape": (ny, nx), "y": y,
             "valid": np.ones(len(y), bool), "t": np.float32(1.0),
             "scale": np.float32(y.mean() / base.mean())}
 
@@ -85,8 +85,7 @@ def test_untrained_model_is_the_bilinear_baseline():
     ex = _example()
     torch.manual_seed(0)
     pred = predict(RateGNN(N_FEATURES), ex)
-    np.testing.assert_allclose(pred.ravel(), ex["base"], rtol=0.02,
-                               atol=0.01 * ex["base"].mean())
+    np.testing.assert_allclose(pred.ravel(), ex["base"], rtol=1e-5, atol=1e-5)
 
 
 def test_message_passing_ignores_node_order():
@@ -115,3 +114,55 @@ def test_training_beats_the_baseline_and_checkpoint_round_trips(tmp_path):
     again, meta = load(tmp_path / "m.pt")
     np.testing.assert_allclose(predict(again, ex), predict(model, ex), rtol=1e-6)
     assert meta["target"] == "X"
+
+
+def test_a_diverging_run_returns_the_baseline_not_its_last_step():
+    torch = pytest.importorskip("torch")
+    from ml.train import train, predict
+    ex = _example()
+    model, hist = train([ex], steps=40, batch=2048, eval_every=10, lr=0.5,
+                        device="cpu", log=lambda *_: None, block=8)
+    if not hist["improved"]:                    # lr = 0.5 normally diverges
+        np.testing.assert_allclose(predict(model, ex).ravel(), ex["base"],
+                                   rtol=1e-5, atol=1e-5)
+    assert hist["best_nll"] <= hist["base_nll"]
+
+
+def test_validation_blocks_cover_the_same_area_at_both_resolutions():
+    from ml.data import val_split
+    held = {}
+    for ratio in (4, 2):                        # 25 um and 50 um over one coarse scan
+        case, coarse = _fake_case(ny=40, nx=44, ratio=ratio)
+        nbr, _, base = queries(case)
+        shape = (len(case.F["ydata"]), len(case.F["xdata"]))
+        ex = {"nbr": nbr, "cshape": coarse.shape, "valid": np.ones(len(base), bool)}
+        va = val_split(ex, block=8)[1].reshape(shape)
+        assert 0.05 < va.mean() < 0.5
+        held[ratio] = va[::ratio, ::ratio]      # sampled on the coarse nodes
+    np.testing.assert_array_equal(held[4], held[2])
+
+
+def test_folds_never_contain_the_held_out_sample():
+    from ml.data import SCANS
+    for test_sample in ("UA1_P1", "UB1_P1", "FP1_P1"):
+        train_scans = [s for s, _ in SCANS if s != test_sample]
+        assert test_sample not in train_scans and len(set(train_scans)) == 2
+
+
+def test_bench_reproduces_the_reference_evaluation():
+    # utils.bench must stay the protocol of 13_evaluate_strategies.py: the
+    # rule plan scored here equals the row that script wrote (tracked CSV)
+    import csv
+    from pathlib import Path
+    from utils.cascade import find_level_file
+    if find_level_file("FP1_P1", 100) is None:
+        pytest.skip("data not available")
+    from utils.bench import Case
+    ref = Path(__file__).parent.parent / "outputs" / "evaluation_step2_lines.csv"
+    want = next(r for r in csv.DictReader(open(ref))
+                if (r["sample"], r["target"], r["strategy"]) ==
+                ("FP1_P1", "Zn.Ka", "roi100+harmonic_c"))
+    case = Case("FP1_P1", "Zn.Ka")
+    got = case.score(*case.rule_plan(1.0), draws=1, boot=20)[0]
+    assert got["mse_ratio"] == pytest.approx(float(want["mse_ratio"]), rel=1e-6)
+    assert got["area"] == pytest.approx(float(want["area"]), rel=1e-6)

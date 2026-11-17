@@ -18,11 +18,8 @@ from pathlib import Path
 import numpy as np
 import torch
 
-from .data import make_example, SCANS, N_FEATURES
+from .data import make_example, SCANS, N_FEATURES, BLOCK, val_split
 from .model import RateGNN, poisson_nll
-
-BLOCK = 64          # px, spatial validation blocks
-
 
 def _tensors(ex, device="cpu"):
     t = {k: torch.from_numpy(ex[k]) for k in ("x", "erel", "qrel", "base")}
@@ -30,14 +27,6 @@ def _tensors(ex, device="cpu"):
     if "y" in ex:
         t["y"] = torch.from_numpy(ex["y"])
     return {k: v.to(device) for k, v in t.items()}
-
-
-def _val_split(ex, block=BLOCK):
-    """Boolean (Q,) arrays: train / validation queries (1 block in 5)."""
-    ny, nx = ex["shape"]
-    by, bx = np.arange(ny) // block, np.arange(nx) // block
-    held = ((by[:, None] + 2 * bx[None, :]) % 5 == 0).reshape(-1)
-    return ex["valid"] & ~held, ex["valid"] & held
 
 
 def fold_examples(test_sample, target, scans=SCANS):
@@ -72,7 +61,7 @@ def train(examples, steps=1500, batch=16384, hidden=32, layers=3, lr=2e-3,
     sched = torch.optim.lr_scheduler.CosineAnnealingLR(opt, steps)
     data = []
     for ex in examples:
-        tr, va = _val_split(ex, block)
+        tr, va = val_split(ex, block)
         data.append((ex, _tensors(ex, device), np.flatnonzero(tr), np.flatnonzero(va)))
 
     def validate():
@@ -86,7 +75,11 @@ def train(examples, steps=1500, batch=16384, hidden=32, layers=3, lr=2e-3,
         return tot / len(data)
 
     base_nll = validate()                 # untrained = bilinear baseline
-    best, best_state, hist = base_nll, None, {"step": [0], "val": [base_nll]}
+    # the step-0 weights are the fallback: a run that never beats the baseline
+    # returns the baseline, not its last (possibly diverged) step
+    best = base_nll
+    best_state = {k: p.clone() for k, p in model.state_dict().items()}
+    hist = {"step": [0], "val": [base_nll]}
     log(f"  step    0  val NLL {base_nll:.5f}  (= bilinear baseline)")
     t0 = time.time()
     for step in range(1, steps + 1):
@@ -106,9 +99,9 @@ def train(examples, steps=1500, batch=16384, hidden=32, layers=3, lr=2e-3,
                 best, best_state = v, {k: p.clone() for k, p in model.state_dict().items()}
             log(f"  step {step:4d}  val NLL {v:.5f}  ({v - base_nll:+.5f} vs baseline)"
                 f"  {time.time() - t0:5.0f}s")
-    if best_state is not None:
-        model.load_state_dict(best_state)
-    hist.update(base_nll=base_nll, best_nll=best)
+    model.load_state_dict(best_state)
+    hist.update(base_nll=base_nll, best_nll=best,
+                improved=bool(best < base_nll))
     return model.to("cpu"), hist
 
 
@@ -136,7 +129,7 @@ def save(model, path, meta):
 
 
 def load(path):
-    ck = torch.load(path, map_location="cpu", weights_only=False)
+    ck = torch.load(path, map_location="cpu", weights_only=True)
     m = ck["meta"]
     model = RateGNN(N_FEATURES, m["hidden"], m["layers"])
     model.load_state_dict(ck["state"])

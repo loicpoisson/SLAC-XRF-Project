@@ -40,8 +40,13 @@ def parse_args(argv=None):
                    help="rule + non-learned controls only (no checkpoint needed)")
     p.add_argument("--draws", type=int, default=10)
     p.add_argument("--boot", type=int, default=300)
-    p.add_argument("--out", default=str(PROJECT_ROOT / "outputs" / "evaluation_planner.csv"))
+    p.add_argument("--out", default=None,
+                   help="CSV (default outputs/evaluation_planner.csv for a full "
+                        "run, evaluation_planner_partial.csv otherwise)")
     return p.parse_args(argv)
+
+
+MISSING = []
 
 
 def evaluate(sample, target, args):
@@ -50,7 +55,7 @@ def evaluate(sample, target, args):
     rows, areas = [], {}
     for k in (0.5, 1.0):
         mask, weight, pred = case.rule_plan(k)
-        areas[k] = float(mask[case.edge_ok & case.full].mean())
+        areas[k] = float(mask.mean())            # over the whole frame
         rows += case.score(mask, weight, pred, name=f"rule_k{k:g}", **kw)
 
     rates = {"bilinear": rate_bilinear(case), "smoothed": rate_smoothed(case)}
@@ -65,7 +70,8 @@ def evaluate(sample, target, args):
             ex, _ = make_example(sample, target, labels=False)
             rates["learned"] = rate_learned(case, ex, model)
         else:
-            print(f"    no checkpoint {ckpt} - controls only")
+            MISSING.append(str(ckpt))
+            print(f"    WARNING: no checkpoint {ckpt} - controls only for this case")
     for name, rate in rates.items():
         for k, area in areas.items():
             for fill in ("rate", "harmonic"):
@@ -89,7 +95,13 @@ def main(argv=None):
               f"{r['area']:5.0%} {r['mse_ratio']:6.2f} [{r['ci_lo']:5.2f},{r['ci_hi']:5.2f}] "
               f"{r['sqrt_ratio']:5.2f} {r['quant_err']:6.1%} {r['recall']:6.0%} "
               f"{r['precision']:5.0%}")
-    out = Path(args.out)
+    full_run = (set(args.samples) == set(SAMPLES) and len(args.targets) >= 4
+                and not MISSING)
+    out = Path(args.out or PROJECT_ROOT / "outputs" /
+               ("evaluation_planner.csv" if full_run else "evaluation_planner_partial.csv"))
+    if MISSING:
+        print(f"\n  WARNING: {len(MISSING)} case(s) had no trained model; their "
+              f"'learned' rows are absent")
     out.parent.mkdir(parents=True, exist_ok=True)
     with open(out, "w", newline="") as f:
         w = csv.DictWriter(f, fieldnames=list(rows[0]))

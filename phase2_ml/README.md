@@ -49,7 +49,8 @@ The predicted rate map then drives the three decisions of a plan
 
 ## Run it
 
-PyTorch lives in its **own environment** (never in the smak env):
+PyTorch lives in its **own environment** (never in the smak env). Use Python
+3.10–3.12 (the pinned numpy / scipy have no wheels for newer versions):
 
 ```bash
 python -m venv ~/xrf-ml && source ~/xrf-ml/bin/activate      # Windows: C:\tools\xrf-ml
@@ -72,6 +73,7 @@ minutes on a GPU. Checkpoints go to `phase2_ml/models/` (not versioned).
 1. Copy the repository and the scans (≈ 700 MB) to the cluster:
    ```bash
    git clone https://github.com/loicpoisson/SLAC-XRF-Project.git && cd SLAC-XRF-Project
+   git checkout feature/ml         # until the branch is merged into main
    mkdir -p data/Data_May2026      # then copy the SMW_*_P1_{250,100,50,25}um_*.hdf5 files into it
    ```
 2. Create the environment once (first block above).
@@ -80,6 +82,8 @@ minutes on a GPU. Checkpoints go to `phase2_ml/models/` (not versioned).
    ```bash
    sbatch phase2_ml/farmshare_train.sbatch
    ```
+   The log is `xrf-planner_<jobid>.log` in the folder you submitted from. If no
+   GPU is granted the job runs on CPU (≈ 1 h per model, 12 models).
 4. Bring `phase2_ml/models/` and `outputs/evaluation_planner.csv` back.
 
 ## Status

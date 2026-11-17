@@ -10,16 +10,21 @@ offset gates each message), so the same layers run on irregular node sets -
 nothing assumes a pixel grid. The prediction is anchored on the bilinear
 interpolation of the coarse target map,
 
-    rate = scale * ( base * exp(g) + softplus(a) * mean(base) ),
+    rate = scale * ( base * exp(g) + floor(a) * mean(base) ),
 
-so an untrained network already equals the non-learned baseline (g = 0,
-a -> 0) and learning can only move away from it where the data say so.
+with g bounded by a tanh and floor(a) = relu(softplus(a) - softplus(a0)), so an
+untrained network IS the non-learned baseline exactly (g = 0, floor = 0) and
+learning can only move away from it where the data say so. The additive term
+lets it predict signal where the coarse scan read zero.
 Trained with the Poisson negative log-likelihood of the fine COUNTS, which is
 the correct loss for a noisy photon-counting label.
 """
 
 import torch
 from torch import nn
+
+
+A0 = -4.0          # initial bias of the additive term (its value is subtracted)
 
 
 class EdgeConv(nn.Module):
@@ -52,7 +57,8 @@ class RateGNN(nn.Module):
                                   nn.Linear(hidden, 2))
         nn.init.zeros_(self.head[-1].weight)          # start at the baseline
         with torch.no_grad():
-            self.head[-1].bias.copy_(torch.tensor([0.0, -6.0]))
+            self.head[-1].bias.copy_(torch.tensor([0.0, A0]))
+        self.floor0 = float(nn.functional.softplus(torch.tensor(A0)))
 
     def encode(self, x, src, dst, erel):
         """Node embeddings of the coarse graph."""
@@ -72,8 +78,8 @@ class RateGNN(nn.Module):
         z = (w * self.val(hj)).sum(dim=1)
         q = torch.stack([torch.log1p(base), torch.full_like(base, float(rho))], dim=1)
         g, a = self.head(torch.cat([z, q], dim=1)).unbind(dim=1)
-        return base * torch.exp(g.clamp(-4.0, 4.0)) \
-            + nn.functional.softplus(a) * base_mean
+        floor = torch.relu(nn.functional.softplus(a) - self.floor0)
+        return base * torch.exp(4.0 * torch.tanh(g / 4.0)) + floor * base_mean
 
 
 def poisson_nll(rate, counts, t=1.0):

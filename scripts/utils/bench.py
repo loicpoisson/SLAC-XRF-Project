@@ -88,6 +88,7 @@ class Case:
             ok &= ~np.isin(ix, [0, 1, len(d["xdata"]) - 1])
         self.edge_ok = ok[None, :]
         self._truths = None
+        self._loo = {}
 
     # ── inputs a planner may use ───────────────────────────────────────────────
     def coarse(self, level=100):
@@ -111,10 +112,12 @@ class Case:
         return project_mask(cmask, d["xdata"], d["ydata"], self.F["xdata"], self.F["ydata"])
 
     def loo_scale(self, level=100):
-        """Coarse->fine count scale measured on the other samples."""
-        ch = None if self.target == "composite" else [self.target]
-        return calibrate_scale(self.sample, ch, level, self.fine_px,
-                               candidates=list(SAMPLES))[0]
+        """Coarse->fine count scale measured on the other samples (cached)."""
+        if level not in self._loo:
+            ch = None if self.target == "composite" else [self.target]
+            self._loo[level] = calibrate_scale(self.sample, ch, level, self.fine_px,
+                                               candidates=list(SAMPLES))[0]
+        return self._loo[level]
 
     # ── truths (scoring only) ──────────────────────────────────────────────────
     @property
@@ -166,6 +169,10 @@ class Case:
             return d
         _, plan = fit_to_budget(d, self.T_lines - self.spent_lines[level],
                                 self.F["xdata"], self.F["ydata"])
+        if not plan["converged"]:
+            raise ValueError("plan cannot spend the raster time within the dwell "
+                             "bounds (mask too small or too large): the comparison "
+                             "would not be at equal time")
         return plan["dwell_ms"]
 
     def score(self, mask, weight, pred, level=100, time_model="lines", draws=10,

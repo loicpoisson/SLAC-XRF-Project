@@ -26,6 +26,22 @@ N_FEATURES = len(ELEMENTS) + 3     # + target (absolute), target @250, local con
 SCANS = [("UA1_P1", 25), ("UB1_P1", 25), ("UA1_P1", 50), ("UB1_P1", 50), ("FP1_P1", 50)]
 
 
+BLOCK = 16          # coarse pixels (1.6 mm): spatial validation blocks
+
+
+def val_split(ex, block=BLOCK):
+    """Boolean (Q,) arrays: train / validation queries (1 block in 5).
+
+    Blocks are defined on the COARSE grid (physical position), so the 25 um
+    and the 50 um scans of one sample hold out the same area: a validation
+    pixel is never trained on through the sample's other resolution."""
+    nx = ex["cshape"][1]
+    node = ex["nbr"][:, 0]                       # lower-left coarse node of the pixel
+    by, bx = (node // nx) // block, (node % nx) // block
+    held = (by + 2 * bx) % 5 == 0
+    return ex["valid"] & ~held, ex["valid"] & held
+
+
 def grid_edges(ny, nx):
     """Directed edges (src, dst) between 8-neighbours of an ny x nx grid and
     their relative offsets (dy, dx) in pixels."""
@@ -100,7 +116,8 @@ def make_example(sample, target, fine_px=None, labels=True):
     ex = {"sample": sample, "target": target, "fine_px": case.fine_px,
           "x": node_features(case), "src": src, "dst": dst, "erel": rel,
           "nbr": nbr, "qrel": qrel, "base": base,
-          "rho": np.float32(case.fine_px / 100.0), "shape": case.shape}
+          "rho": np.float32(case.fine_px / 100.0), "shape": case.shape,
+          "cshape": (ny, nx), "coarse_dwell": np.float32(case.dwell["c100"])}
     if labels:
         y = case.maps["A"].reshape(-1).astype(np.float32)          # counts at 10 ms
         valid = ((case.maps["A"].sum(axis=1) > 0)[:, None] & case.edge_ok

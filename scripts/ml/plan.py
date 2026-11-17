@@ -13,7 +13,6 @@ are given, so a comparison isolates what the model's prediction is worth:
 import numpy as np
 from scipy import ndimage
 
-from utils.bench import T_REF
 from utils.evaluation import sqrt_weight
 from utils.reconstruction import coarse_rate, fill_bilinear, fill_harmonic
 
@@ -31,7 +30,9 @@ def plan_from_rate(case, rate, area, fill="rate", level=100):
     fill='harmonic' : graph-harmonic interpolation of the coarse points lying
                       outside the scanned area (the current pipeline's fill)
     """
-    mask = top_area_mask(rate, area, case.edge_ok & case.full)
+    # `area` and the quantile are over the WHOLE frame, like the rule's mask,
+    # so every planner scans the same number of pixels
+    mask = top_area_mask(rate, area)
     weight = sqrt_weight(rate, mask)
     if fill == "rate":
         pred = rate
@@ -65,4 +66,4 @@ def rate_learned(case, ex, model):
     """The RateGNN's prediction, on the count scale measured on OTHER samples
     (the model itself never saw this sample either)."""
     from .train import predict
-    return predict(model, ex) * case.loo_scale(100) / T_REF
+    return predict(model, ex) * case.loo_scale(100) / case.dwell["c100"]

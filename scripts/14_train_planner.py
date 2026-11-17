@@ -49,7 +49,15 @@ def main(argv=None):
         for sample in args.samples:
             path = Path(args.out) / target / f"heldout_{sample}.pt"
             if path.exists() and not args.force:
-                print(f"{path} exists - skipped (--force to retrain)")
+                import json
+                old = json.loads(path.with_suffix(".json").read_text())
+                same = all(old.get(k) == getattr(args, k)
+                           for k in ("steps", "hidden", "layers", "seed"))
+                print(f"{path} exists - skipped"
+                      + ("" if same else "  (WARNING: trained with other settings: "
+                         f"steps {old.get('steps')}, hidden {old.get('hidden')}, "
+                         f"layers {old.get('layers')}, seed {old.get('seed')})")
+                      + "  (--force to retrain)")
                 continue
             print(f"\n=== target {target}, held-out {sample} ===", flush=True)
             t0 = time.time()
@@ -66,7 +74,9 @@ def main(argv=None):
                     "history": hist, "minutes": (time.time() - t0) / 60}
             save(model, path, meta)
             print(f"  saved {path}  (val NLL {hist['best_nll']:.5f}, baseline "
-                  f"{hist['base_nll']:.5f}, {meta['minutes']:.1f} min)", flush=True)
+                  f"{hist['base_nll']:.5f}, {meta['minutes']:.1f} min)"
+                  + ("" if hist["improved"] else "  WARNING: never beat the "
+                     "baseline - the checkpoint IS the baseline"), flush=True)
 
 
 if __name__ == "__main__":
