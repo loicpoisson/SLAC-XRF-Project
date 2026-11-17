@@ -60,3 +60,5 @@ models/
 *.dpm
 *_scan_plan.json
 *_scan_plan.pkl
+# --- ML training logs ---
+phase2_ml/logs/

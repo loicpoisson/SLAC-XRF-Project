@@ -1,80 +1,100 @@
-# Phase 2 — ML extension
+# Phase 2 — learned planner
 
-Goal: test whether a **learned model** can predict a better per-pixel dwell map from the
-coarse scan than the Phase-1 heuristic. The physics fixes the target: under Poisson noise
-and a fixed time budget the MSE-optimal allocation is `t ∝ sqrt(rate)` (see
-`scripts/utils/quality.py` and the `'sqrt'` strategy in `scripts/utils/dwell.py`). The
-heuristic applies that rule to the blurry coarse map; the model tries to recover the
-rule applied to the (unknown) fine map.
+Goal: replace the hand-written rule that turns the 100 µm detection scan into a
+25 µm scan plan by a model that **uses every element the detector records** and
+is trained on full scans of other samples.
 
-## Notebooks
+Everything is plain Python modules with tests (`scripts/ml/`,
+`tests/test_ml.py`) and is scored by the same benchmark as the rule-based
+pipeline (`scripts/utils/bench.py`). No notebook is needed.
 
-| Notebook | Purpose |
-|----------|---------|
-| `notebooks/01_dwell_unet_poc.ipynb` | Feasibility POC: small U-Net (~30k params), coarse 250 µm composite → budget-normalised `sqrt(fine 50 µm)` dwell map, leave-one-sample-out over UA1_P1 / UB1_P1 / FP1_P1, scored with `utils.quality.poisson_mse` at equal total time against uniform raster, the coarse sqrt heuristic and the oracle. Committed **with outputs** from a CPU run. |
+## The model (`scripts/ml/model.py`)
 
-### Design (01)
-- Loads data **only** through the repo's `scripts/utils` (`hdf5_reader.load_xrf` — SMAK
-  plane offset and `median(TIME)/TIME` normalisation — plus `validation_utils`, `dwell`,
-  `quality`). No re-implemented loader.
-- Leave-one-sample-out (train on 2 samples, test on the 3rd, all 3 folds); input
-  normalisation statistics from the training samples only; non-overlapping test tiles.
-- On-the-fly random crops (64×64) with flips/rot90; output head bounded to [1, 50] ms;
-  fixed epochs (no early stopping / tuning on the test sample); seeds fixed.
-- `INPUT_MODE = 'composite'` (default) or `'elements'` (one input channel per element).
+A graph neural network, `RateGNN`:
 
-### Results of the committed run (CPU, 30 epochs × 40 steps × batch 16, composite input)
+- **Nodes** = the pixels of the 100 µm detection scan. Features = all 15
+  element channels (scaled per sample), the target element in absolute counts,
+  the target in the 250 µm scan, and its local contrast.
+- **Message passing** = 3 edge-conditioned layers over the 8 neighbours; a
+  small MLP of the relative offset gates each message, so the layers do not
+  assume a pixel grid and run on any node set.
+- **Read-out** = each fine pixel attends over the 4 coarse nodes around it and
+  predicts its rate for the target element.
+- The prediction is anchored on the non-learned baseline:
+  `rate = scale · (bilinear · exp(g) + softplus(a) · mean)`, so the untrained
+  network *is* the bilinear interpolation and learning can only depart from it
+  where the data support it.
+- **Loss** = Poisson negative log-likelihood of the fine scan's counts — the
+  right loss for a noisy photon-counting label (no "ground truth" is assumed).
+- ~20 k parameters.
 
-Poisson-MSE ratio `MSE_raster / MSE_strategy` on the **held-out** sample, all maps at
-mean dwell 10 ms (> 1 = better than raster):
+The predicted rate map then drives the three decisions of a plan
+(`scripts/ml/plan.py`): where to scan (highest predicted rate), how long
+(`√rate`), and what to put in the pixels that are skipped.
 
-| held-out | (a) uniform | (b) heuristic sqrt (`allocate_dwell`) | (b') sqrt(coarse) | (c) U-Net | (d) oracle sqrt(fine) | headroom closed by (c) |
-|---|---|---|---|---|---|---|
-| UA1_P1 | 1.000 | 1.014 | 1.009 | **1.016** | 1.124 | +1.7 % |
-| UB1_P1 | 1.000 | 1.024 | 1.027 | **1.029** | 1.144 | +1.6 % |
-| FP1_P1 | 1.000 | 1.157 | **1.218** | 1.143 | 1.567 | −21 % |
+## Protocol
 
-Headroom = `(c − best(b, b')) / (d − best(b, b'))`.
+- **Leave-one-sample-out.** The model that plans a sample was trained only on
+  scans of the *other* samples (UA1 / UB1 at 25 and 50 µm, FP1 at 50 µm).
+- Model selection uses spatial blocks held out **inside the training samples**;
+  the test sample is never touched before scoring.
+- **Controls.** The learned map is compared at the *same scanned area* with
+  (a) the current rule, (b) the bilinear map, (c) the smoothed coarse map —
+  all through the same planner. Beating the raw rule only shows that denoising
+  helps; the model has to beat the **smoothed** control to be worth using.
+- Scoring = `utils/bench.py`: equal real time (line-scan model, coarse scans
+  charged), independent 25 ms truth where it exists, Poisson MSE with a
+  bootstrap interval, √-domain MSE, hot-spot quantification and detection.
+  The benchmark reproduces `13_evaluate_strategies.py` to the last digit.
 
-**Reading.** (c) is marginally above the best heuristic on UA1_P1 and UB1_P1 (+0.002 in
-ratio, i.e. ~2 % of the available headroom — well within what a different seed or epoch
-count could change) and clearly below it on FP1_P1. So on this data the U-Net does **not**
-beat the coarse sqrt heuristic in any meaningful way. The U-Net map is closer to the
-oracle in log-dwell MSE on all three folds, yet scores worse on FP1_P1: the log loss
-weights all pixels equally while the Poisson MSE is dominated by bright pixels. Training
-on the Poisson objective directly is the obvious next experiment. Note also how small the
-total headroom is (oracle: +12–57 % over raster).
+## Run it
 
-**This is a feasibility check, not evidence**: 3 samples, 3 folds, one seed, no
-hyper-parameter search. The oracle (d) uses the fine truth and is only an upper bound.
-Limitations are listed at the end of the notebook.
+PyTorch lives in its **own environment** (never in the smak env):
 
-## Running it
-
-**Locally** (needs `torch`; do not install it into the smak env — use a separate venv):
+```bash
+python -m venv ~/xrf-ml && source ~/xrf-ml/bin/activate      # Windows: C:\tools\xrf-ml
+pip install -r requirements.txt
+pip install torch            # CPU: --index-url https://download.pytorch.org/whl/cpu
 ```
-set XRF_DATA_DIR=C:\path\to\SLAC-XRF-Project\data\Data_May2026
-jupyter nbconvert --to notebook --execute --inplace phase2_ml/notebooks/01_dwell_unet_poc.ipynb
+
+```bash
+python scripts/14_train_planner.py                  # 12 models (3 held-out samples x Fe Zn Mn Cu)
+python scripts/15_evaluate_planner.py               # -> outputs/evaluation_planner.csv
+python scripts/15_evaluate_planner.py --controls-only   # rule + non-learned controls, no PyTorch
+python -m pytest -q tests/test_ml.py
 ```
-The first code cell finds the repo root by walking up from the working directory
-(override with `XRF_PROJECT_ROOT`) and adds `scripts/` to `sys.path`. `XRF_EPOCHS`
-and `XRF_INPUT_MODE` override the training length and the input mode.
-Runtime of the committed run on a laptop CPU: ~36 min (3 folds × 30 epochs, 7–20 min per fold).
 
-**On Colab**: put the repo (at least `scripts/` and `phase2_ml/`) and
-`data/Data_May2026/` under `/MyDrive/SLAC-XRF-Project/` on Google Drive (or set
-`XRF_PROJECT_ROOT` / `XRF_DATA_DIR` in the config cell), open the notebook in Colab and
-run all; the first cell mounts Drive. A GPU is not needed.
+Training takes about 1 h per model on a laptop CPU (8 cores) and seconds to
+minutes on a GPU. Checkpoints go to `phase2_ml/models/` (not versioned).
 
-## Models to explore (after the POC)
+### On FarmShare
 
-- **U-Net** — supervised image-to-image, what the POC tests
-- **SLADS** (Supervised Learning Approach for Dynamic Sampling) — Random Forest / NN for adaptive sampling, designed for microscopy
-- **gpCAM** (LBL) — Gaussian Process active learning, no pretraining required
-- **Bluesky-Adaptive** (NSLS-II) — direct beamline integration (deployment, not training)
+1. Copy the repository and the scans (≈ 700 MB) to the cluster:
+   ```bash
+   git clone https://github.com/loicpoisson/SLAC-XRF-Project.git && cd SLAC-XRF-Project
+   mkdir -p data/Data_May2026      # then copy the SMW_*_P1_{250,100,50,25}um_*.hdf5 files into it
+   ```
+2. Create the environment once (first block above).
+3. Check the partition names (`sinfo`), adjust the two `ADJUST` lines of
+   `phase2_ml/farmshare_train.sbatch`, then:
+   ```bash
+   sbatch phase2_ml/farmshare_train.sbatch
+   ```
+4. Bring `phase2_ml/models/` and `outputs/evaluation_planner.csv` back.
 
-## What to read next
-- Phase 1 progress report: [../outputs/progress_report.md](../outputs/progress_report.md)
-- Paper 2 (Boltz-Webb 2026) — the reference for the temporal-adaptive idea
-- Godaliyadda et al. 2018 — original SLADS paper
-- Noack et al. (LBL) — gpCAM publications
+## Status
+
+Code complete and tested; trained and scored only as far as
+`outputs/progress_report.md` §18 says. The earlier U-Net experiment
+(`notebooks/01_dwell_unet_poc.ipynb`: coarse composite → dwell map) did not beat
+the `√` heuristic and is kept for the record.
+
+## Next models (same data layer, same benchmark)
+
+- **Reconstruction with the fine measurements as nodes**: add the scanned
+  25 µm pixels to the graph to predict the skipped ones (a particle cut by the
+  ROI border continues outside it).
+- **Self-supervised denoising** from the two independent 25 µm scans
+  (Noise2Noise), which would improve every map, raster included.
+- **Uncertainty-driven acquisition**: predict a rate *distribution* and scan
+  where the expected error reduction per second is highest.
