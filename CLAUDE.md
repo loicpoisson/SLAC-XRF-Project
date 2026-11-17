@@ -84,6 +84,10 @@ predate the corrections listed in its erratum).
   block-bootstrap CIs; `--step2`, `--time-model lines`, `--jobs`).
 - Open questions for Sam: report §13.2, §14.4, §16.4 (coarse beam footprint,
   criterion, line-plan format, counting during gap crossings, TIME channel).
+- Phase 2 learned planner: `scripts/ml/` (RateGNN), `14_train_planner.py`,
+  `15_evaluate_planner.py`, `utils/bench.py`; PyTorch in a SEPARATE env
+  (C:\tools\xrf-ml). Code complete, only 2 of 12 cases trained (report §18);
+  full run meant for FarmShare (`phase2_ml/farmshare_train.sbatch`).
 - Phase 2 (`phase2_ml/`): U-Net POC does not beat the sqrt heuristic; graph
   methods surveyed in `Papers/reports/GNN pour imagerie XRF adaptative.md`.
 

@@ -803,4 +803,69 @@ test with script 13 before changing the default.
   first pixel of every row may behave the same.
 - Real kinematics for `beamline.json`.
 
-*End of report (v8).*
+
+## 18. Learned planner (2026-11) — code complete, first results on 2 of 12 cases
+
+Phase 2 is now plain tested modules (`scripts/ml/`, no notebook), scored by the
+same protocol as everything else. Design and usage: `phase2_ml/README.md`.
+
+- **Benchmark as a library** (`utils/bench.py`): any plan — where to scan, how
+  long, what to predict elsewhere — gets the reference metrics. It reproduces
+  `13_evaluate_strategies.py` to the last digit (pinned by a test).
+- **Model** (`RateGNN`, ~20 k parameters): a graph neural network over the
+  100 µm detection scan (nodes = coarse pixels with all 15 element channels,
+  edge-conditioned message passing, attention read-out per fine pixel),
+  anchored on the bilinear interpolation and trained with the Poisson
+  likelihood of the fine counts.
+- **Protocol**: leave-one-sample-out (the model that plans a sample never saw
+  any scan of it), model selection on spatial blocks inside the training
+  samples, comparison at the same scanned area against the rule and against
+  two non-learned controls (bilinear and smoothed maps through the same
+  planner). An adversarial review found no leakage; its other findings are
+  fixed.
+
+### 18.1 What the controls show (all 12 cases, no learning)
+Ranking pixels on a smoothed or an interpolated map instead of the rule's
+thresholded cells does **not** beat the rule consistently (5–6 of 12 cases on
+MSE). Smoothing helps the weak elements (Cu, Mn) and hurts the strong ones
+(Fe, Zn); interpolation does the opposite. No fixed filter is right for every
+element — which is the case for a model that adapts to the noise level.
+A perfect selector would find 96–98 % of the hot spots while scanning 25 % of
+the frame (66–76 % for the non-learned maps): the headroom is in detection.
+
+### 18.2 First trained models (held-out sample UB1, 900 steps, one seed)
+Truth B, equal real time, fill = the planner's own rate map:
+
+| target | area | planner | Poisson-MSE ratio [95 % CI] | recall | quant. error |
+|---|---|---|---|---|---|
+| Cu | 46 % | rule k = 1 | 2.53 [2.40, 2.65] | 86 % | 7.7 % |
+| Cu | 46 % | smoothed control | **2.79** [2.66, 2.90] | 87 % | 6.7 % |
+| Cu | 46 % | **learned** | 2.56 [2.45, 2.66] | **92 %** | 6.7 % |
+| Zn | 58 % | rule k = 1 | 1.66 [1.58, 1.75] | 90 % | 4.2 % |
+| Zn | 58 % | bilinear control | 1.71 [1.64, 1.78] | 93 % | 4.3 % |
+| Zn | 58 % | **learned** | **1.81** [1.74, 1.89] | **94 %** | 4.0 % |
+| Cu | 74 % | rule k = 0.5 / smoothed / **learned** | 1.42 / 1.50 / 1.41 | 94 / 94 / **96 %** | 7.1 / 6.9 / 7.0 % |
+| Zn | 71 % | rule k = 0.5 / bilinear / **learned** | 1.55 / 1.55 / **1.62** | 94 / 95 / **96 %** | 4.1 / 4.2 / 4.0 % |
+
+Reading, with its limits:
+- The learned planner has the **best hot-spot recall in all four comparisons**
+  (+1 to +6 points) at the same scanned area.
+- On MSE it is the best for Zn and in the middle for Cu (the smoothed control
+  wins there). It is never the worst, unlike each fixed filter.
+- This is **2 cases of 12, one seed, one held-out sample**. A first run of the
+  Cu model (before the review fixes, other validation split) scored 2.77×:
+  the run-to-run spread is of the order of the differences on MSE. Nothing
+  here is a result yet; the full 12-case run with several seeds is the next
+  step (`sbatch phase2_ml/farmshare_train.sbatch`, or ~12 h on the laptop).
+- Rows: `outputs/evaluation_planner_partial.csv`.
+
+### 18.3 Next
+1. Full leave-one-sample-out run (12 models, ≥ 3 seeds) on FarmShare; decide
+   on a criterion fixed in advance: learned vs the better control per case, on
+   recall and MSE.
+2. If it holds: wire the model into `xrf_pipeline.py` as an optional planner
+   (`--planner learned`), keeping the rule as the default.
+3. Then the models listed in `phase2_ml/README.md` (fine measurements as graph
+   nodes, Noise2Noise denoising, uncertainty-driven acquisition).
+
+*End of report (v9).*

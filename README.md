@@ -100,6 +100,13 @@ python scripts/13_evaluate_strategies.py --step2   # + reconstructions / ROI rul
 python scripts/13_evaluate_strategies.py --step2 --time-model lines   # equal REAL time, section 16
 ```
 
+### Learned planner (Phase 2, needs PyTorch in its own env)
+```bash
+python scripts/14_train_planner.py        # leave-one-sample-out, 12 models
+python scripts/15_evaluate_planner.py     # vs the rule and non-learned controls
+```
+See `phase2_ml/README.md` and report §18 (code complete; 2 of 12 cases trained).
+
 ### Profile samples by sparsity (where does adaptive help?)
 ```bash
 python scripts/11_profile_samples.py                 # per-sample (composite)
